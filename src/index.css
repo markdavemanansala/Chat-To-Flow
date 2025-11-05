@@ -1,0 +1,84 @@
+@import 'reactflow/dist/style.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    /* Midnight theme - deep blue-black palette */
+    --background: 240 20% 8%;
+    --foreground: 210 25% 92%;
+    --card: 240 22% 10%;
+    --card-foreground: 210 25% 92%;
+    --popover: 240 22% 10%;
+    --popover-foreground: 210 25% 92%;
+    --primary: 220 70% 50%;
+    --primary-foreground: 210 25% 92%;
+    --secondary: 240 18% 15%;
+    --secondary-foreground: 210 25% 92%;
+    --muted: 240 16% 14%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 240 25% 18%;
+    --accent-foreground: 210 25% 92%;
+    --destructive: 0 62% 45%;
+    --destructive-foreground: 210 25% 92%;
+    --border: 240 18% 18%;
+    --input: 240 18% 15%;
+    --ring: 220 70% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  
+  /* Fix select dropdown styling for dark mode */
+  select {
+    @apply bg-background text-foreground;
+  }
+  
+  select option {
+    @apply bg-background text-foreground;
+  }
+  
+  /* Ensure select dropdowns are readable in both modes */
+  select:not([multiple]) {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m6 8 4 4 4-4'/%3e%3c/svg%3e");
+    background-position: right 0.5rem center;
+    background-repeat: no-repeat;
+    background-size: 1.5em 1.5em;
+    padding-right: 2.5rem;
+  }
+  
+  .dark select:not([multiple]) {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%9ca3af' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m6 8 4 4 4-4'/%3e%3c/svg%3e");
+  }
+}
