@@ -4,11 +4,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
-import { useSetWorkflow, useSetFlow, useNodes, useEdges, useWorkflowSummary } from "@/store/app"
+import { useSetWorkflow, useSetFlow, useNodes, useEdges, useWorkflowSummary, useAiContext, useApplyPatch, useOnPatchApplied, useAppStore } from "@/store/app"
 import { WorkflowPreview } from "@/components/WorkflowPreview"
 import { convertWorkflowToFlow } from "@/components/WorkflowBuilder"
 import { generateWorkflowFromIntent, getConversationalResponse, modifyWorkflow } from "@/lib/api"
 import { isOpenAIAvailable } from "@/lib/config"
+import { planFromIntent } from "@/workflow/planner"
+import { findNodeByIntent, findNodesByIntent } from "@/workflow/nodeMatcher"
 
 // Helper function to append new nodes to existing workflow
 function chainAppend(existingNodes, existingEdges, newNodes, newEdges) {
@@ -46,6 +48,8 @@ export function Chat() {
   const existingNodes = useNodes()
   const existingEdges = useEdges()
   const workflowSummary = useWorkflowSummary()
+  const aiContext = useAiContext()
+  const applyPatch = useApplyPatch()
 
   const [messages, setMessages] = useState([
     {
@@ -141,51 +145,177 @@ export function Chat() {
           }, 300)
           return { collectingInfo: false, intent: "", details: [] }
         } else {
-          // Continue conversation about existing workflow with AI
+          // Use patch-based modification system
           setTimeout(async () => {
             setMessages(currentMessages => {
+              // Get conversational response
               getConversationalResponse(userMessage, currentMessages, { 
-                workflow: currentWorkflow, 
+                workflow: workflowSummary, 
                 nodes: existingNodes,
                 edges: existingEdges
-              }).then(aiResponse => {
+              }).then(async (aiResponse) => {
+                const responseText = typeof aiResponse === 'string' ? aiResponse : aiResponse.text
+                
+                /**
+                 * Try direct node manipulation first (simpler, more reliable)
+                 * This bypasses the AI planner for common operations like removal
+                 */
+                const lowerMessage = userMessage.toLowerCase();
+                let patchApplied = false;
+                let patchResult = null;
+                
+                // ALWAYS get fresh nodes from store - never use stale existingNodes
+                // The store is the single source of truth
+                const currentStoreNodes = useAppStore.getState().nodes;
+                const currentStoreEdges = useAppStore.getState().edges;
+                const nodesToUse = currentStoreNodes;
+                
+                /**
+                 * Direct removal handling - bypass patch system for reliability
+                 * Uses simple pattern matching to find and remove nodes
+                 */
+                if ((lowerMessage.includes('remove') || lowerMessage.includes('delete')) && nodesToUse.length > 0) {
+                  const nodesToRemove = findNodesByIntent(nodesToUse, userMessage);
+                  
+                  if (nodesToRemove.length > 0) {
+                    // Create direct REMOVE_NODE patches
+                    const patches = nodesToRemove.map(node => ({ op: 'REMOVE_NODE', id: node.id }));
+                    const patch = patches.length === 1 ? patches[0] : { op: 'BULK', ops: patches };
+                    
+                    patchResult = applyPatch(patch);
+                    patchApplied = true;
+                    
+                    if (!patchResult.ok) {
+                      console.error('❌ Direct removal failed:', patchResult.issues);
+                    }
+                  }
+                }
+                
+                /**
+                 * Direct add handling for common node types
+                 * Uses pattern matching to identify what to add
+                 */
+                if (!patchApplied && (lowerMessage.includes('add') || lowerMessage.includes('create')) && nodesToUse.length > 0) {
+                  let nodeToAdd = null;
+                  
+                  if (lowerMessage.includes('validate') && (lowerMessage.includes('information') || lowerMessage.includes('info'))) {
+                    const { createNode } = await import('@/workflow/utils');
+                    const lastNode = nodesToUse[nodesToUse.length - 1];
+                    const position = lastNode ? { 
+                      x: (lastNode.position?.x || 100) + 300, 
+                      y: lastNode.position?.y || 100 
+                    } : { x: 100, y: 100 };
+                    
+                    nodeToAdd = createNode('logic.filter', {
+                      position,
+                      data: {
+                        label: 'Validate Information to ensure all required fields are complete',
+                        config: {}
+                      }
+                    });
+                  }
+                  
+                  if (nodeToAdd) {
+                    let patch = { 
+                      op: 'ADD_NODE', 
+                      node: nodeToAdd 
+                    };
+                    
+                    // Add edge from last node if exists
+                    if (nodesToUse.length > 0) {
+                      const { connect } = await import('@/workflow/utils');
+                      const lastNodeId = nodesToUse[nodesToUse.length - 1].id;
+                      const edge = connect(lastNodeId, nodeToAdd.id);
+                      patch = {
+                        op: 'BULK',
+                        ops: [
+                          { op: 'ADD_NODE', node: nodeToAdd },
+                          { op: 'ADD_EDGE', edge }
+                        ]
+                      };
+                    }
+                    
+                    patchResult = applyPatch(patch);
+                    patchApplied = true;
+                    
+                    if (!patchResult.ok) {
+                      console.error('❌ Direct addition failed:', patchResult.issues);
+                      patchApplied = false;
+                    }
+                  }
+                }
+                
+                /**
+                 * If direct removal didn't work, try AI planner
+                 * This uses OpenAI function calling to generate patches
+                 */
+                if (!patchApplied) {
+                  // Get fresh summary from store
+                  const currentSummary = useAppStore.getState().aiContext.currentSummary || 'Empty workflow (no nodes)';
+                  const patch = await planFromIntent(userMessage, currentSummary, nodesToUse)
+                  
+                  // Apply patch using store's applyPatch
+                  // Empty BULK patches are OK (e.g., for confirmations like "Yes, daily")
+                  if (!patch) {
+                    setMessages(prev => {
+                      if (!pendingResponseRef.current) return prev
+                      pendingResponseRef.current = false
+                      return [...prev, {
+                        id: Date.now() + 1,
+                        text: "I couldn't generate a valid change. Could you please specify which node you'd like to remove?",
+                        role: "assistant",
+                        timestamp: new Date(),
+                      }]
+                    })
+                    return
+                  }
+                  
+                  // If it's an empty BULK patch, just acknowledge and skip applying
+                  if (patch.op === 'BULK' && (!patch.ops || patch.ops.length === 0)) {
+                    const currentNodes = useAppStore.getState().nodes;
+                    const currentEdges = useAppStore.getState().edges;
+                    patchResult = { ok: true, nodes: currentNodes, edges: currentEdges };
+                    patchApplied = true;
+                  } else {
+                    // Apply the patch
+                    patchResult = applyPatch(patch);
+                    patchApplied = true;
+                    
+                    if (!patchResult.ok) {
+                      console.error('❌ Patch application failed:', patchResult.issues);
+                    }
+                  }
+                }
+                
+                // Add AI message
                 setMessages(prev => {
                   if (!pendingResponseRef.current) return prev
                   pendingResponseRef.current = false
                   
-                  const responseText = typeof aiResponse === 'string' ? aiResponse : aiResponse.text
-                  const shouldModify = typeof aiResponse === 'object' ? aiResponse.shouldModifyWorkflow : false
-                  
                   const aiMessage = {
                     id: Date.now() + 1,
-                    text: responseText,
+                    text: patchResult && patchResult.ok 
+                      ? responseText || "Workflow updated successfully!"
+                      : patchResult && patchResult.issues
+                        ? `I had trouble updating the workflow: ${patchResult.issues.join(', ')}`
+                        : responseText || "I processed your request.",
                     role: "assistant",
                     timestamp: new Date(),
                   }
                   
-                  // Handle workflow modification
-                  if (shouldModify && currentWorkflow && existingNodes.length > 0) {
-                    const modificationType = aiResponse.modificationType
-                    const targetStep = aiResponse.targetStep
-                    
-                    if (modificationType && targetStep) {
-                      const modified = modifyWorkflow(
-                        currentWorkflow, 
-                        existingNodes, 
-                        existingEdges, 
-                        modificationType, 
-                        targetStep, 
-                        userMessage
-                      )
-                      
-                      setFlow(modified.nodes, modified.edges)
-                      setWorkflow(modified.workflow)
-                      
-                      console.log('✅ Workflow modified:', modificationType, targetStep)
-                    }
-                  }
-                  
                   return [...prev, aiMessage]
+                })
+              }).catch(error => {
+                console.error('Error applying patch:', error)
+                setMessages(prev => {
+                  if (!pendingResponseRef.current) return prev
+                  pendingResponseRef.current = false
+                  return [...prev, {
+                    id: Date.now() + 1,
+                    text: "I encountered an error updating the workflow. Please try again.",
+                    role: "assistant",
+                    timestamp: new Date(),
+                  }]
                 })
               })
               return currentMessages
@@ -477,50 +607,44 @@ export function Chat() {
 
     try {
       console.log('🚀 Starting workflow generation with intent:', combinedIntent)
-      // Generate workflow using OpenAI (or mock fallback)
-      const updatedWorkflow = await generateWorkflowFromIntent(combinedIntent)
-      console.log('✅ Generated workflow:', updatedWorkflow)
       
-      if (!updatedWorkflow) {
-        throw new Error('Workflow generation returned null or undefined')
+      // Use patch-based system for new workflows
+      const currentSummary = existingNodes.length > 0 ? aiContext.currentSummary : 'Empty workflow (no nodes)'
+      const patch = await planFromIntent(combinedIntent, currentSummary, existingNodes)
+      
+      // Apply patch
+      const result = applyPatch(patch)
+      
+      if (!result.ok) {
+        throw new Error(`Patch application failed: ${result.issues?.join(', ')}`)
       }
       
-      setLocalWorkflow(updatedWorkflow)
+      console.log('✅ Applied patch successfully')
       
-      // Convert and set flow state
-      const { nodes, edges } = convertWorkflowToFlow(updatedWorkflow)
-      console.log('🔄 Converted nodes:', nodes, 'edges:', edges)
-      
-      if (!nodes || nodes.length === 0) {
-        console.warn('⚠️ No nodes generated from workflow')
-      }
-      
-      // Check if we should append or create new
-      const shouldAppend = existingNodes.length > 0
-      
-      if (shouldAppend) {
-        console.log('📌 Appending to existing workflow with', existingNodes.length, 'nodes')
-        const merged = chainAppend(existingNodes, existingEdges, nodes, edges)
-        setFlow(merged.nodes, merged.edges)
+      // Update workflow summary if we have nodes
+      if (result.nodes.length > 0) {
+        const triggerNode = result.nodes.find(n => n.data?.role === 'TRIGGER')
+        const actionNodes = result.nodes.filter(n => n.data?.role === 'ACTION')
         
-        // Merge workflow summaries
-        setWorkflow((prev) => {
-          if (!prev) return updatedWorkflow
-          const mergedSteps = [...(prev.steps || []), ...updatedWorkflow.steps]
-          const mergedIntegrations = Array.from(new Set([...(prev.integrations || []), ...updatedWorkflow.integrations]))
-          return { 
-            ...prev, 
-            steps: mergedSteps, 
-            integrations: mergedIntegrations,
-            // Keep original name and trigger
-            name: prev.name || updatedWorkflow.name,
-            trigger: prev.trigger || updatedWorkflow.trigger
-          }
-        })
-      } else {
-        console.log('🆕 Creating new workflow (no existing nodes)')
-        setFlow(nodes, edges)
-        setWorkflow(updatedWorkflow)
+        const workflowSummary = {
+          name: 'New Workflow',
+          trigger: triggerNode?.data?.label || 'Manual Trigger',
+          steps: actionNodes.map(n => n.data?.label || n.id),
+          integrations: Array.from(new Set(
+            result.nodes
+              .map(n => {
+                const kind = n.data?.kind || ''
+                if (kind.includes('facebook')) return 'Facebook'
+                if (kind.includes('sheets')) return 'Google Sheets'
+                if (kind.includes('email')) return 'Email'
+                if (kind.includes('telegram')) return 'Telegram'
+                return null
+              })
+              .filter(Boolean)
+          )),
+          source: 'chat'
+        }
+        setWorkflow(workflowSummary)
       }
       
       console.log('💾 Workflow state updated in store')
@@ -539,9 +663,9 @@ export function Chat() {
           !m.text.includes("I'll get")
         )
         
-        const successMessage = shouldAppend
-          ? `Perfect! ✅ I've added new steps to your existing workflow! 🎉\n\nNew steps added: ${updatedWorkflow.steps.join(' → ')}\n\nYou can continue chatting to refine it or click 'Edit in Builder' to make manual changes.`
-          : `Perfect! ✅ I've created your workflow: "${updatedWorkflow.name}". Check it out on the right side! 🎉\n\nTrigger: ${updatedWorkflow.trigger}\nSteps: ${updatedWorkflow.steps.join(' → ')}\n\nYou can continue chatting to refine it or click 'Edit in Builder' to make manual changes.`
+        const successMessage = result.nodes.length > 0
+          ? `Perfect! ✅ I've ${existingNodes.length > 0 ? 'updated' : 'created'} your workflow! 🎉\n\nCheck it out on the right side!\n\nYou can continue chatting to refine it or click 'Edit in Builder' to make manual changes.`
+          : `I've processed your request, but no changes were made to the workflow.`
         
         return [...filtered, {
           id: Date.now() + 1,
@@ -587,7 +711,22 @@ export function Chat() {
     }
   }
 
-  const { nodes, edges } = workflow ? convertWorkflowToFlow(workflow) : { nodes: [], edges: [] }
+  // Use store nodes/edges as the source of truth for the preview
+  // Always pass store values - WorkflowPreview will sync them to React Flow's internal state
+  // This ensures removals are reflected immediately without causing lag
+  const previewNodes = existingNodes
+  const previewEdges = existingEdges
+  
+  // Debug: Verify store updates are reaching the component
+  useEffect(() => {
+    console.log('🔄 Chat component re-rendered with store state:', {
+      nodesCount: existingNodes.length,
+      edgesCount: existingEdges.length,
+      nodeIds: existingNodes.map(n => n.id),
+      nodesArrayRef: existingNodes,
+      edgesArrayRef: existingEdges
+    })
+  }, [existingNodes, existingEdges])
 
   return (
     <div className="max-w-[1800px] mx-auto">
@@ -690,8 +829,8 @@ export function Chat() {
               <div className="h-full">
                 <WorkflowPreview
                   workflow={workflow}
-                  nodes={nodes}
-                  edges={edges}
+                  nodes={previewNodes}
+                  edges={previewEdges}
                   onOpenBuilder={handleOpenBuilder}
                 />
               </div>

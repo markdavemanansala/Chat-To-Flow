@@ -8,8 +8,8 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/com
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { useNodes, useEdges, useSetFlow, useSetEdges, useSetWorkflow, useWorkflowSummary } from '@/store/app'
-import { compileIntentToFlow } from '@/workflow/compile'
+import { useNodes, useEdges, useSetFlow, useSetEdges, useSetWorkflow, useWorkflowSummary, useAiContext, useApplyPatch } from '@/store/app'
+import { planFromIntent } from '@/workflow/planner'
 import { TestConsole } from '@/components/test/TestConsole'
 import { ValidationHealthBar } from '@/components/validation/ValidationHealthBar'
 import { IntegrationsDrawer } from '@/components/integrations/IntegrationsDrawer'
@@ -69,6 +69,8 @@ export default function Builder(props: BuilderProps = {}) {
   const setEdges = useSetEdges()
   const setWorkflow = useSetWorkflow()
   const workflowSummary = useWorkflowSummary()
+  const aiContext = useAiContext()
+  const applyPatch = useApplyPatch()
 
   // Check OpenAI connection status
   useEffect(() => {
@@ -127,35 +129,20 @@ export default function Builder(props: BuilderProps = {}) {
               const updatedMessages = [...prev, aiMessage]
               setMessages(updatedMessages)
               
-              // Then generate workflow using OpenAI (better than compileIntentToFlow)
+              // Use patch-based system
               setTimeout(async () => {
-                const { generateWorkflowFromIntent } = await import('@/lib/api')
-                const { convertWorkflowToFlow } = await import('@/components/WorkflowBuilder')
+                const patch = await planFromIntent(userMessage, aiContext.currentSummary, nodes)
+                const result = applyPatch(patch)
                 
-                const workflowSummary = await generateWorkflowFromIntent(userMessage)
-                const { nodes: newNodes, edges: newEdges } = convertWorkflowToFlow(workflowSummary)
-                const summary = workflowSummary
-                
-                // Check if we should append or replace
-                if (nodes.length > 0) {
-                  const merged = chainAppend(nodes, edges, newNodes, newEdges)
-                  setFlow(merged.nodes, merged.edges)
-                  setWorkflow((prev: any) => {
-                    const prevSummary = prev || { name: summary.name, trigger: summary.trigger, steps: [], integrations: [], source: 'chat' }
-                    const mergedSteps = [...(prevSummary.steps || []), ...summary.steps]
-                    const mergedIntegrations = Array.from(new Set([...(prevSummary.integrations || []), ...summary.integrations]))
-                    return { ...prevSummary, steps: mergedSteps, integrations: mergedIntegrations }
-                  })
+                if (result.ok) {
                   setMessages((prev) => [
                     ...prev,
-                    { id: Date.now() + 1, role: 'assistant', text: 'Added nodes to your existing workflow.' },
+                    { id: Date.now() + 1, role: 'assistant', text: result.nodes.length > nodes.length ? 'Added nodes to your workflow.' : 'Updated your workflow.' },
                   ])
                 } else {
-                  setFlow(newNodes, newEdges)
-                  setWorkflow(summary)
                   setMessages((prev) => [
                     ...prev,
-                    { id: Date.now() + 1, role: 'assistant', text: 'Generated workflow from your message.' },
+                    { id: Date.now() + 1, role: 'assistant', text: `Failed to update workflow: ${result.issues?.join(', ')}` },
                   ])
                 }
               }, 1000)

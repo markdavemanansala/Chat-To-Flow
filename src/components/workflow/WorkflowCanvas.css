@@ -1,0 +1,30 @@
+/**
+ * WorkflowCanvas component styles
+ * Centralized CSS to avoid inline styling per coding standards
+ */
+
+.workflow-canvas-container {
+  width: 100%;
+  height: 100%;
+}
+
+.workflow-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+
+.workflow-toolbar-help {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+
+.workflow-canvas-wrapper {
+  flex: 1;
+  position: relative;
+}
+

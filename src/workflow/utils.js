@@ -1,4 +1,5 @@
 import { getRectOfNodes } from 'reactflow';
+import { getNodeRole } from './graphTypes.js';
 
 /**
  * Create a new node with the given kind
@@ -18,8 +19,9 @@ export function createNode(kind, partial = {}) {
     position: partial.position || { x: 100, y: 100 },
     data: {
       kind,
-      label: partial.label || defaultLabel,
-      config: partial.config || {},
+      label: partial.data?.label || partial.label || defaultLabel,
+      config: partial.data?.config || partial.config || {},
+      role: partial.data?.role || getNodeRole(kind),
       ...partial.data,
     },
     ...partial,

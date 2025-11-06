@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { useCallback, useEffect, useState, useRef } from 'react'
+import { useCallback, useEffect, useState, useRef, useMemo } from 'react'
 import ReactFlow, {
   Background,
   Controls,
@@ -14,14 +14,14 @@ import ReactFlow, {
   Position,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
+import './WorkflowCanvas.css'
 
 import { Button } from '@/components/ui/button'
-import { useNodes, useEdges, useSetFlow, useSetEdges, useResetFlow, useWorkflowSummary, useUpsertNode, useSetWorkflow } from '@/store/app'
+import { useNodes, useEdges, useSetFlow, useSetEdges, useResetFlow, useWorkflowSummary, useUpsertNode, useSetWorkflow, useValidateGraph, useOnPatchApplied, useAppStore } from '@/store/app'
 import { convertWorkflowToFlow } from '@/components/WorkflowBuilder'
 import { createNode } from '@/workflow/utils'
 import { useToast } from '@/components/ToastProvider'
 import { saveWorkflowDraft } from '@/lib/api'
-import { createHistory } from '@/lib/undoRedo'
 import { Badge } from '@/components/ui/badge'
 import { checkNodeCredentials } from '@/utils/credentials'
 
@@ -73,10 +73,11 @@ function getNodeLabel(data) {
 }
 
 // Custom node component with handles for edge creation, badges, and tooltips
-function CustomNode({ data, selected }) {
+function CustomNode({ data, selected, id }) {
   const [hasMissingCreds, setHasMissingCreds] = useState(false)
   const [showTooltip, setShowTooltip] = useState(false)
   const [helpText, setHelpText] = useState('')
+  const [highlighted, setHighlighted] = useState(false)
   
   const displayLabel = getNodeLabel(data)
 
@@ -115,9 +116,33 @@ function CustomNode({ data, selected }) {
     }
   }, [data])
 
+  // Check if this node should be highlighted
+  useEffect(() => {
+    const checkHighlight = () => {
+      try {
+        const highlightedNodesStr = sessionStorage.getItem('highlightedNodes');
+        if (highlightedNodesStr) {
+          const highlightedNodes = new Set(JSON.parse(highlightedNodesStr));
+          setHighlighted(highlightedNodes.has(id));
+        } else {
+          setHighlighted(false);
+        }
+      } catch (e) {
+        setHighlighted(false);
+      }
+    };
+    
+    checkHighlight();
+    const interval = setInterval(checkHighlight, 100);
+    return () => clearInterval(interval);
+  }, [id]);
+
   return (
     <div 
-      className={`relative px-4 py-2 shadow-md rounded-md bg-card border-2 ${selected ? 'border-primary' : 'border-border'}`}
+      className={`relative px-4 py-2 shadow-md rounded-md bg-card border-2 transition-all ${
+        highlighted ? 'border-green-500 shadow-lg ring-2 ring-green-300 animate-pulse' : 
+        selected ? 'border-primary' : 'border-border'
+      }`}
       onMouseEnter={() => setShowTooltip(true)}
       onMouseLeave={() => setShowTooltip(false)}
     >
@@ -148,60 +173,158 @@ function CustomNode({ data, selected }) {
   )
 }
 
+// Create node types - static to prevent React Flow warnings
+// Highlighting is handled inside CustomNode via props
 const nodeTypes = {
   default: CustomNode,
-}
+};
 
 interface WorkflowCanvasInnerProps {
   onNodeSelect?: (node: any) => void
 }
 
+/**
+ * WorkflowCanvasInner - Main canvas component for workflow visualization
+ * Uses React Flow's internal state management and syncs with Zustand store
+ * 
+ * @param {Object} props - Component props
+ * @param {Function} props.onNodeSelect - Callback when a node is selected
+ */
 function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
-  const nodes = useNodes()
-  const edges = useEdges()
+  // Store state - single source of truth
+  const storeNodes = useNodes()
+  const storeEdges = useEdges()
   const workflowSummary = useWorkflowSummary()
   const setFlow = useSetFlow()
-  const setEdges = useSetEdges()
   const resetFlow = useResetFlow()
   const upsertNode = useUpsertNode()
   const setWorkflow = useSetWorkflow()
   const { showToast } = useToast()
+  
+  // Local UI state
   const [selectedNodeIds, setSelectedNodeIds] = useState(new Set())
   const [selectedEdgeIds, setSelectedEdgeIds] = useState(new Set())
   const [isSaving, setIsSaving] = useState(false)
-  const historyRef = useRef(createHistory())
+  const [highlightedNodes, setHighlightedNodes] = useState(new Set())
   const autosaveTimerRef = useRef(null)
   const lastSavedRef = useRef(null)
+  const positionDebounceTimerRef = useRef(null)
 
   const rf = useReactFlow()
 
-  // Initialize nodes/edges from workflowSummary if store is empty
+  const validateGraph = useValidateGraph()
+  const onPatchApplied = useOnPatchApplied()
+
+  /**
+   * Initialize nodes/edges from workflowSummary if store is empty
+   * This ensures templates and initial workflows load correctly
+   */
   useEffect(() => {
-    if (nodes.length === 0 && edges.length === 0 && workflowSummary) {
+    if (storeNodes.length === 0 && storeEdges.length === 0 && workflowSummary) {
       const { nodes: convertedNodes, edges: convertedEdges } = convertWorkflowToFlow(workflowSummary)
       if (convertedNodes.length > 0) {
         setFlow(convertedNodes, convertedEdges)
-        historyRef.current.push({ nodes: convertedNodes, edges: convertedEdges })
       }
     }
-  }, [nodes.length, edges.length, workflowSummary, setFlow])
+  }, [storeNodes.length, storeEdges.length, workflowSummary, setFlow])
+
+  /**
+   * CRITICAL: Force React Flow to update when store changes
+   * Track structure changes to prevent unnecessary updates
+   */
+  const prevStructureRef = useRef('')
+  useEffect(() => {
+    if (!rf) return
+    
+    // Create structure signature
+    const structure = `${storeNodes.map(n => n.id).sort().join(',')}|${storeEdges.map(e => e.id).sort().join(',')}`
+    
+    // Only update if structure actually changed
+    if (structure !== prevStructureRef.current) {
+      console.log('🔄 Structure changed - forcing React Flow update:', storeNodes.length, 'nodes,', storeEdges.length, 'edges')
+      console.log('🔄 Node IDs:', storeNodes.map(n => n.id))
+      
+      // Use React Flow's imperative API to force update
+      rf.setNodes([...storeNodes])
+      rf.setEdges([...storeEdges])
+      prevStructureRef.current = structure
+      
+      console.log('✅ React Flow updated via rf.setNodes/setEdges')
+    }
+  }, [storeNodes, storeEdges, rf])
+  
+  /**
+   * Listen to patch-applied events and force React Flow update
+   * This ensures immediate visual feedback when patches are applied
+   */
+  useEffect(() => {
+    const unsubscribe = onPatchApplied(({ patch, result }) => {
+      if (result.ok && rf) {
+        console.log('🔄 Patch applied - forcing React Flow update')
+        const currentNodes = useAppStore.getState().nodes
+        const currentEdges = useAppStore.getState().edges
+        rf.setNodes(currentNodes)
+        rf.setEdges(currentEdges)
+        console.log('✅ React Flow updated after patch')
+      }
+    })
+    
+    return unsubscribe
+  }, [onPatchApplied, rf])
+
+
+  // Highlight nodes when patches are applied
+  useEffect(() => {
+    const unsubscribe = onPatchApplied(({ patch, result }) => {
+      if (result.ok && patch) {
+        const changedIds = new Set()
+        
+        if (patch.op === 'ADD_NODE' && patch.node) {
+          changedIds.add(patch.node.id)
+        } else if (patch.op === 'UPDATE_NODE' && patch.id) {
+          changedIds.add(patch.id)
+        } else if (patch.op === 'REMOVE_NODE' && patch.id) {
+          // Node removed, highlight surrounding nodes
+          const node = storeNodes.find(n => n.id === patch.id)
+          if (node) {
+            storeEdges.filter(e => e.source === patch.id || e.target === patch.id).forEach(e => {
+              if (e.source !== patch.id) changedIds.add(e.source)
+              if (e.target !== patch.id) changedIds.add(e.target)
+            })
+          }
+        } else if (patch.op === 'BULK' && patch.ops) {
+          patch.ops.forEach(op => {
+            if (op.op === 'ADD_NODE' && op.node) changedIds.add(op.node.id)
+            if (op.op === 'UPDATE_NODE' && op.id) changedIds.add(op.id)
+          })
+        }
+        
+        if (changedIds.size > 0) {
+          setHighlightedNodes(changedIds)
+          setTimeout(() => setHighlightedNodes(new Set()), 2000)
+        }
+      }
+    })
+    
+    return unsubscribe
+  }, [storeNodes, storeEdges, onPatchApplied])
 
   // Define handleAutoSave before using it
   const handleAutoSave = useCallback(async () => {
-    if (nodes.length === 0) return
-    const currentState = JSON.stringify({ nodes, edges })
+    if (storeNodes.length === 0) return
+    const currentState = JSON.stringify({ nodes: storeNodes, edges: storeEdges })
     if (currentState === lastSavedRef.current) return
 
     try {
-      const triggerNode = nodes.find(n => n.data?.kind?.startsWith('trigger'))
-      const actionNodes = nodes.filter(n => n.data?.kind?.startsWith('action'))
+      const triggerNode = storeNodes.find(n => n.data?.kind?.startsWith('trigger'))
+      const actionNodes = storeNodes.filter(n => n.data?.kind?.startsWith('action'))
       
       const summary = {
         name: workflowSummary?.name || 'Untitled Workflow',
         trigger: triggerNode?.data?.label || 'Manual Trigger',
         steps: actionNodes.map(n => n.data?.label || n.data?.kind || 'Unknown'),
         integrations: Array.from(new Set(
-          nodes
+          storeNodes
             .map(n => n.data?.kind)
             .filter(Boolean)
             .map(kind => {
@@ -212,24 +335,24 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
               return 'Generic'
             })
         )),
-        notes: workflowSummary?.notes || `Workflow with ${nodes.length} nodes`,
+        notes: workflowSummary?.notes || `Workflow with ${storeNodes.length} nodes`,
         source: 'chat',
       }
 
       await saveWorkflowDraft(summary)
       setWorkflow(summary)
-      lastSavedRef.current = JSON.stringify({ nodes, edges })
+      lastSavedRef.current = JSON.stringify({ nodes: storeNodes, edges: storeEdges })
       showToast('Saved', 'success')
     } catch (err) {
       console.error('Autosave failed', err)
     }
-  }, [nodes, edges, workflowSummary, setWorkflow, showToast])
+  }, [storeNodes, storeEdges, workflowSummary, setWorkflow, showToast])
 
   // Autosave functionality
   useEffect(() => {
-    if (nodes.length === 0) return
+    if (storeNodes.length === 0) return
 
-    const currentState = JSON.stringify({ nodes, edges })
+    const currentState = JSON.stringify({ nodes: storeNodes, edges: storeEdges })
     if (currentState === lastSavedRef.current) return
 
     // Clear existing timer
@@ -247,39 +370,77 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
         clearTimeout(autosaveTimerRef.current)
       }
     }
-  }, [nodes, edges, handleAutoSave])
+  }, [storeNodes, storeEdges, handleAutoSave])
 
   // Track selected nodes/edges
   useEffect(() => {
-    const selectedNodes = nodes.filter(n => n.selected).map(n => n.id)
-    const selectedEdges = edges.filter(e => e.selected).map(e => e.id)
+    const selectedNodes = storeNodes.filter(n => n.selected).map(n => n.id)
+    const selectedEdges = storeEdges.filter(e => e.selected).map(e => e.id)
     setSelectedNodeIds(new Set(selectedNodes))
     setSelectedEdgeIds(new Set(selectedEdges))
-  }, [nodes, edges])
+  }, [storeNodes, storeEdges])
 
+  /**
+   * Handle node changes from React Flow
+   * Syncs changes to the store while preventing infinite loops
+   * Position changes are debounced to avoid excessive updates
+   */
+  /**
+   * Handle node changes from React Flow (manual edits)
+   * Updates store directly - Zustand is single source of truth
+   * 
+   * @param {Array} changes - React Flow change array
+   */
   const onNodesChange = useCallback((changes) => {
-    const next = applyNodeChanges(changes, nodes)
-    // Push to history before change
-    if (changes.some(c => c.type !== 'select' && c.type !== 'position')) {
-      historyRef.current.push({ nodes, edges })
+    // Apply changes to current store nodes
+    const next = applyNodeChanges(changes, storeNodes);
+    
+    // Separate significant changes (add/remove/update) from UI-only changes (select/position)
+    const significantChanges = changes.filter(c => 
+      c.type !== 'select' && c.type !== 'position'
+    );
+    
+    // Handle position changes separately with debouncing to prevent lag
+    const positionChanges = changes.filter(c => c.type === 'position');
+    
+    if (significantChanges.length > 0) {
+      // Immediate update for structural changes (add/remove/update)
+      console.log('🖼️ Manual edit detected:', significantChanges.map(c => c.type));
+      setFlow(next, storeEdges);
+    } else if (positionChanges.length > 0) {
+      // Debounced update for position changes (prevents lag during dragging)
+      if (positionDebounceTimerRef.current) {
+        clearTimeout(positionDebounceTimerRef.current);
+      }
+      positionDebounceTimerRef.current = setTimeout(() => {
+        setFlow(next, storeEdges);
+        positionDebounceTimerRef.current = null;
+      }, 300);
     }
-    setFlow(next, edges)
-  }, [nodes, edges, setFlow])
-
+    // Selection changes don't need to update the store
+  }, [storeNodes, storeEdges, setFlow, positionDebounceTimerRef])
+  
+  /**
+   * Handle edge changes from React Flow (manual edits)
+   * Updates store directly
+   * 
+   * @param {Array} changes - React Flow edge change array
+   */
   const onEdgesChange = useCallback((changes) => {
-    const next = applyEdgeChanges(changes, edges)
-    // Push to history before change
-    if (changes.some(c => c.type !== 'select')) {
-      historyRef.current.push({ nodes, edges })
-    }
-    setEdges(next)
-  }, [nodes, edges, setEdges])
-
+    const next = applyEdgeChanges(changes, storeEdges)
+    setFlow(storeNodes, next)
+  }, [storeNodes, storeEdges, setFlow])
+  
+  /**
+   * Handle new edge connections from React Flow
+   * Updates store directly
+   * 
+   * @param {Object} params - Connection parameters from React Flow
+   */
   const onConnect = useCallback((params) => {
-    historyRef.current.push({ nodes, edges })
-    const next = addEdge(params, edges)
-    setEdges(next)
-  }, [nodes, edges, setEdges])
+    const next = addEdge(params, storeEdges)
+    setFlow(storeNodes, next)
+  }, [storeNodes, storeEdges, setFlow])
 
   const handleFit = useCallback(() => {
     rf.fitView({ padding: 0.2, duration: 300 })
@@ -290,7 +451,7 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
   }, [rf])
 
   const handleExport = useCallback(() => {
-    const data = { nodes, edges }
+    const data = { nodes: storeNodes, edges: storeEdges }
     const json = JSON.stringify(data, null, 2)
     const blob = new Blob([json], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
@@ -300,7 +461,7 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
     a.click()
     URL.revokeObjectURL(url)
     showToast('Workflow exported successfully', 'success')
-  }, [nodes, edges, showToast])
+  }, [storeNodes, storeEdges, showToast])
 
   const handleImport = useCallback(() => {
     const jsonStr = window.prompt('Paste JSON with {nodes, edges}:')
@@ -319,29 +480,16 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
   }, [setFlow, showToast])
 
   const handleValidate = useCallback(() => {
-    const triggers = nodes.filter(n => n.data?.kind?.startsWith('trigger'))
-    const actions = nodes.filter(n => n.data?.kind?.startsWith('action'))
-
-    if (triggers.length === 0) {
-      showToast('Validation failed: No trigger found. A workflow must have exactly one trigger.', 'error')
-      return
+    const result = validateGraph()
+    if (result.ok) {
+      showToast('Workflow is valid!', 'success')
+    } else {
+      showToast(`Validation issues: ${result.issues?.join(', ')}`, 'error')
     }
-
-    if (triggers.length > 1) {
-      showToast(`Validation failed: Multiple triggers found (${triggers.length}). A workflow must have exactly one trigger.`, 'error')
-      return
-    }
-
-    if (actions.length === 0) {
-      showToast('Validation failed: No actions found. A workflow must have at least one action.', 'error')
-      return
-    }
-
-    showToast('Validation passed! Workflow has one trigger and at least one action.', 'success')
-  }, [nodes, showToast])
+  }, [validateGraph, showToast])
 
   const handleSaveDraft = useCallback(async () => {
-    if (nodes.length === 0) {
+    if (storeNodes.length === 0) {
       showToast('No workflow to save', 'error')
       return
     }
@@ -349,15 +497,15 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
     setIsSaving(true)
     try {
       // Convert nodes/edges to workflow summary format
-      const triggerNode = nodes.find(n => n.data?.kind?.startsWith('trigger'))
-      const actionNodes = nodes.filter(n => n.data?.kind?.startsWith('action'))
+      const triggerNode = storeNodes.find(n => n.data?.kind?.startsWith('trigger'))
+      const actionNodes = storeNodes.filter(n => n.data?.kind?.startsWith('action'))
       
       const summary = {
         name: workflowSummary?.name || 'Untitled Workflow',
         trigger: triggerNode?.data?.label || 'Manual Trigger',
         steps: actionNodes.map(n => n.data?.label || n.data?.kind || 'Unknown'),
         integrations: Array.from(new Set(
-          nodes
+          storeNodes
             .map(n => n.data?.kind)
             .filter(Boolean)
             .map(kind => {
@@ -368,7 +516,7 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
               return 'Generic'
             })
         )),
-        notes: workflowSummary?.notes || `Workflow with ${nodes.length} nodes`,
+        notes: workflowSummary?.notes || `Workflow with ${storeNodes.length} nodes`,
         source: 'chat' as const,
       }
 
@@ -380,7 +528,7 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
     } finally {
       setIsSaving(false)
     }
-  }, [nodes, workflowSummary, setWorkflow, showToast])
+  }, [storeNodes, workflowSummary, setWorkflow, showToast])
 
   const handleReset = useCallback(() => {
     resetFlow()
@@ -401,24 +549,24 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
   const onNodeDoubleClick = useCallback((evt, node) => {
     const newLabel = window.prompt('Rename node label', node?.data?.label || '')
     if (!newLabel) return
-    const next = nodes.map((n) => n.id === node.id ? { ...n, data: { ...n.data, label: newLabel } } : n)
-    setFlow(next, edges)
-  }, [nodes, edges, setFlow])
+    const next = storeNodes.map((n) => n.id === node.id ? { ...n, data: { ...n.data, label: newLabel } } : n)
+    setFlow(next, storeEdges)
+  }, [storeNodes, storeEdges, setFlow])
+
+  const handleRenameNode = useCallback((node, newLabel) => {
+    const next = storeNodes.map((n) => n.id === node.id ? { ...n, data: { ...n.data, label: newLabel } } : n)
+    setFlow(next, storeEdges)
+  }, [storeNodes, storeEdges, setFlow])
 
   // Keyboard shortcuts
   useEffect(() => {
-    const handleKeyDown = (e) => {
-      // Skip if user is typing in an input/textarea
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return
-      }
-
+    const onKeyDown = (e) => {
       // Delete/Backspace: Remove selected nodes and edges
-      if ((e.key === 'Delete' || e.key === 'Backspace') && (selectedNodeIds.size > 0 || selectedEdgeIds.size > 0)) {
-        e.preventDefault()
-        const remainingNodes = nodes.filter(n => !selectedNodeIds.has(n.id))
-        const remainingEdges = edges.filter(e => !selectedEdgeIds.has(e.id))
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const remainingNodes = storeNodes.filter(n => !selectedNodeIds.has(n.id))
+        const remainingEdges = storeEdges.filter(e => !selectedEdgeIds.has(e.id))
         setFlow(remainingNodes, remainingEdges)
+        showToast('Deleted selection', 'success')
       }
 
       // Cmd/Ctrl + S: Save draft
@@ -436,9 +584,8 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
       // Cmd/Ctrl + Z: Undo
       if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
         e.preventDefault()
-        const previous = historyRef.current.undo()
-        if (previous) {
-          setFlow(previous.nodes, previous.edges)
+        const undo = useAppStore.getState().undo
+        if (undo()) {
           showToast('Undo', 'default')
         }
       }
@@ -446,22 +593,21 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
       // Cmd/Ctrl + Shift + Z or Cmd/Ctrl + Y: Redo
       if (((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'z') || ((e.metaKey || e.ctrlKey) && e.key === 'y')) {
         e.preventDefault()
-        const next = historyRef.current.redo()
-        if (next) {
-          setFlow(next.nodes, next.edges)
+        const redo = useAppStore.getState().redo
+        if (redo()) {
           showToast('Redo', 'default')
         }
       }
     }
 
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [nodes, edges, selectedNodeIds, selectedEdgeIds, handleSaveDraft, handleExport, setFlow, showToast])
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [storeNodes, storeEdges, selectedNodeIds, selectedEdgeIds, handleSaveDraft, handleExport, setFlow, showToast])
 
   return (
     <>
-      {/* Toolbar */}
-      <div className="flex items-center gap-2 p-2 border-b bg-card">
+      {/* Toolbar - Workflow manipulation controls */}
+      <div className="workflow-toolbar">
         <Button size="sm" variant="outline" onClick={handleFit}>Fit</Button>
         <Button size="sm" variant="outline" onClick={handleCenter}>Center</Button>
         <Button size="sm" variant="outline" onClick={handleExport}>Export JSON</Button>
@@ -471,23 +617,24 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
           size="sm" 
           variant="outline" 
           onClick={handleSaveDraft}
-          disabled={isSaving || nodes.length === 0}
+          disabled={isSaving || storeNodes.length === 0}
         >
           {isSaving ? 'Saving...' : 'Save Draft'}
         </Button>
         <Button size="sm" variant="destructive" onClick={handleReset}>Reset</Button>
-        <div className="ml-auto text-xs text-muted-foreground">
+        <div className="workflow-toolbar-help">
           <kbd className="px-1 py-0.5 bg-muted rounded">Del</kbd> / <kbd className="px-1 py-0.5 bg-muted rounded">Backspace</kbd> to delete • 
           <kbd className="px-1 py-0.5 bg-muted rounded">Ctrl+S</kbd> to save • 
           <kbd className="px-1 py-0.5 bg-muted rounded">Ctrl+E</kbd> to export
         </div>
       </div>
 
-      {/* Canvas */}
-      <div className="flex-1">
+      {/* Canvas - React Flow visualization of the workflow */}
+      <div className="workflow-canvas-wrapper">
         <ReactFlow
-          nodes={nodes}
-          edges={edges}
+          key={`${storeNodes.map(n => n.id).sort().join(',')}-${storeEdges.map(e => e.id).sort().join(',')}`}
+          nodes={storeNodes}
+          edges={storeEdges}
           nodeTypes={nodeTypes}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
@@ -528,7 +675,11 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
           fitView
           snapToGrid
           snapGrid={[15, 15]}
-          deleteKeyCode={null} // We handle deletion manually with keyboard shortcuts
+          deleteKeyCode="Delete"
+          nodesDeletable={true}
+          nodesDraggable={true}
+          nodesConnectable={true}
+          elementsSelectable={true}
         >
           <Background />
           <MiniMap />

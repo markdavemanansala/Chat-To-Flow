@@ -5,9 +5,10 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { templates } from "@/data/templates"
-import { useSetTemplate, useSetWorkflow } from "@/store/app"
+import { useSetTemplate, useSetWorkflow, useSetFlow } from "@/store/app"
 import { GuidedTemplateChecklist } from "@/components/templates/GuidedTemplateChecklist"
 import { generateWorkflowFromIntent } from "@/lib/api"
+import { convertWorkflowToFlow } from "@/components/WorkflowBuilder"
 
 const industries = ["All", "F&B", "Retail", "Real Estate", "Education", "Healthcare", "VA/Freelance", "Generic"]
 
@@ -15,6 +16,7 @@ export function Templates() {
   const navigate = useNavigate()
   const setTemplate = useSetTemplate()
   const setWorkflow = useSetWorkflow()
+  const setFlow = useSetFlow()
 
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedIndustry, setSelectedIndustry] = useState("All")
@@ -62,6 +64,13 @@ export function Templates() {
       }
 
       setWorkflow(enhancedWorkflow)
+      
+      // Convert workflow to nodes/edges and set in store (same as chat)
+      const { nodes, edges } = convertWorkflowToFlow(enhancedWorkflow)
+      if (nodes.length > 0) {
+        setFlow(nodes, edges)
+        console.log('✅ Template workflow converted to nodes/edges:', nodes.length, 'nodes')
+      }
 
       // Navigate to preview
       navigate("/preview")
@@ -79,6 +88,14 @@ export function Templates() {
         ...checklistData
       }
       setWorkflow(workflowSummary)
+      
+      // Convert workflow to nodes/edges and set in store (same as chat)
+      const { nodes, edges } = convertWorkflowToFlow(workflowSummary)
+      if (nodes.length > 0) {
+        setFlow(nodes, edges)
+        console.log('✅ Fallback template workflow converted to nodes/edges:', nodes.length, 'nodes')
+      }
+      
       navigate("/preview")
       setSelectedTemplateForChecklist(null)
     } finally {

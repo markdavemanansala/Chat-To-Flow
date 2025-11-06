@@ -257,6 +257,7 @@ export function convertWorkflowToFlow(workflow) {
         kind: triggerKind,
         label: workflow.trigger,
         config: {},
+        role: 'TRIGGER', // Ensure role is set for proper matching
       },
       style: { background: '#e3f2fd', color: '#1565c0', border: '1px solid #1565c0' },
     }
@@ -268,6 +269,12 @@ export function convertWorkflowToFlow(workflow) {
   // Create nodes from steps with inferred kinds
   workflow.steps.forEach((step, index) => {
     const kind = inferNodeKindFromStep(step, workflow.trigger)
+    // Determine role based on kind
+    let role = 'ACTION';
+    if (kind.startsWith('trigger.')) role = 'TRIGGER';
+    else if (kind.startsWith('logic.')) role = 'LOGIC';
+    else if (kind.startsWith('ai.')) role = 'AI';
+    
     const node = {
       id: `step_${index}`,
       type: 'default',
@@ -276,6 +283,7 @@ export function convertWorkflowToFlow(workflow) {
         kind: kind,
         label: step,
         config: {},
+        role: role, // Ensure role is set for proper matching
       },
     }
     nodes.push(node)

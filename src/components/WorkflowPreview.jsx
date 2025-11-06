@@ -1,38 +1,88 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import ReactFlow, {
   Background,
   Controls,
   MiniMap,
+  ConnectionMode,
+  ReactFlowProvider,
+  useReactFlow,
   useNodesState,
   useEdgesState,
-  ConnectionMode,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 import './WorkflowBuilder.css'
 
 import { Button } from './ui/button'
 
-export function WorkflowPreview({ workflow, nodes, edges, onOpenBuilder }) {
-  const [rfNodes, setNodes, onNodesChange] = useNodesState([])
-  const [rfEdges, setEdges, onEdgesChange] = useEdgesState([])
-
+// Inner component that uses React Flow hooks
+function WorkflowPreviewInner({ workflow, nodes, edges, onOpenBuilder }) {
+  const { fitView } = useReactFlow()
+  
+  // Use React Flow's internal state for smooth rendering
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState([])
+  const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState([])
+  
+  // Track previous node/edge IDs and array references to detect ALL changes
+  const prevNodeIdsRef = useRef('')
+  const prevEdgeIdsRef = useRef('')
+  const prevNodesArrayRef = useRef(null)
+  const prevEdgesArrayRef = useRef(null)
+  
+  // Determine what nodes/edges to display - compute directly, don't memoize
+  // This ensures we always get the latest values
+  const sourceNodes = nodes !== undefined ? nodes : (workflow ? convertToFlowNodes(workflow).nodes : [])
+  const sourceEdges = edges !== undefined ? edges : (workflow ? convertToFlowNodes(workflow).edges : [])
+  
+  // Sync store/props to React Flow state when ANY change is detected
+  // Depend on nodes/edges/workflow props directly, not computed values
   useEffect(() => {
-    if (nodes && nodes.length > 0) {
-      setNodes(nodes)
-      setEdges(edges)
-    } else if (workflow && workflow.steps) {
-      // Convert workflow summary to visual nodes
-      const converted = convertToFlowNodes(workflow)
-      setNodes(converted.nodes)
-      setEdges(converted.edges)
+    const currentNodeIds = sourceNodes.map(n => n.id).sort().join(',')
+    const currentEdgeIds = sourceEdges.map(e => e.id).sort().join(',')
+    
+    // Check BOTH array reference changes AND structure changes
+    const nodesArrayChanged = sourceNodes !== prevNodesArrayRef.current
+    const edgesArrayChanged = sourceEdges !== prevEdgesArrayRef.current
+    const nodesChanged = currentNodeIds !== prevNodeIdsRef.current
+    const edgesChanged = currentEdgeIds !== prevEdgeIdsRef.current
+    
+    // Update if ANY change detected (array ref OR structure)
+    if (nodesArrayChanged || edgesArrayChanged || nodesChanged || edgesChanged || prevNodeIdsRef.current === '') {
+      console.log('🔄 WorkflowPreview: Syncing to React Flow', {
+        nodesCount: sourceNodes.length,
+        edgesCount: sourceEdges.length,
+        nodeIds: sourceNodes.map(n => n.id),
+        nodesArrayChanged,
+        edgesArrayChanged,
+        nodesChanged,
+        edgesChanged,
+        propsNodes: nodes?.length,
+        propsEdges: edges?.length
+      })
+      
+      // Update React Flow state - create new array references
+      setRfNodes([...sourceNodes])
+      setRfEdges([...sourceEdges])
+      
+      // Update ALL refs
+      prevNodesArrayRef.current = sourceNodes
+      prevEdgesArrayRef.current = sourceEdges
+      prevNodeIdsRef.current = currentNodeIds
+      prevEdgeIdsRef.current = currentEdgeIds
+      
+      // Fit view after update
+      if (sourceNodes.length > 0) {
+        setTimeout(() => {
+          fitView({ padding: 0.2, duration: 300 })
+        }, 100)
+      }
     }
-  }, [workflow, nodes, edges, setNodes, setEdges])
+  }, [nodes, edges, workflow, setRfNodes, setRfEdges, fitView, sourceNodes, sourceEdges])
 
-  if (!workflow && (!nodes || nodes.length === 0)) {
+  if (rfNodes.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-muted-foreground">
         <p className="text-center">
-        Describe your automation in chat
+          Describe your automation in chat
           <br />
           <span className="text-xs">The workflow will appear here</span>
         </p>
@@ -41,7 +91,7 @@ export function WorkflowPreview({ workflow, nodes, edges, onOpenBuilder }) {
   }
 
   return (
-    <div className="relative h-full w-full">
+    <>
       <ReactFlow
         nodes={rfNodes}
         edges={rfEdges}
@@ -52,6 +102,7 @@ export function WorkflowPreview({ workflow, nodes, edges, onOpenBuilder }) {
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
+        proOptions={{ hideAttribution: true }}
       >
         <Background />
         <MiniMap />
@@ -64,6 +115,22 @@ export function WorkflowPreview({ workflow, nodes, edges, onOpenBuilder }) {
           </Button>
         </div>
       )}
+    </>
+  )
+}
+
+// Main component with ReactFlowProvider
+export function WorkflowPreview({ workflow, nodes, edges, onOpenBuilder }) {
+  return (
+    <div className="relative h-full w-full">
+      <ReactFlowProvider>
+        <WorkflowPreviewInner
+          workflow={workflow}
+          nodes={nodes}
+          edges={edges}
+          onOpenBuilder={onOpenBuilder}
+        />
+      </ReactFlowProvider>
     </div>
   )
 }
@@ -121,4 +188,3 @@ function convertToFlowNodes(workflow) {
 
   return { nodes, edges }
 }
-
