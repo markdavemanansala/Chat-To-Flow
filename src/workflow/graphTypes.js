@@ -42,6 +42,9 @@
  * @returns {"TRIGGER"|"LOGIC"|"AI"|"ACTION"}
  */
 export function getNodeRole(kind) {
+  if (!kind || typeof kind !== 'string') {
+    return 'ACTION'; // Default fallback for invalid/undefined kind
+  }
   if (kind.startsWith('trigger.')) return 'TRIGGER';
   if (kind.startsWith('logic.')) return 'LOGIC';
   if (kind.startsWith('ai.')) return 'AI';

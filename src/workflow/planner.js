@@ -2,7 +2,7 @@
  * @fileoverview AI planner that converts chat intent to graph patches
  */
 
-import { createNode, connect } from './utils.js';
+import { createNode, connect, getDefaultLabel } from './utils.js';
 import { getNodeRole } from './graphTypes.js';
 
 /**
@@ -17,7 +17,7 @@ export async function planFromIntent(intent, contextSummary, nodes = []) {
   
   // If no API key, use rule-based fallback
   if (!OPENAI_API_KEY || !OPENAI_API_KEY.trim()) {
-    return planFromIntentFallback(intent, contextSummary);
+    return planFromIntentFallback(intent, contextSummary, nodes);
   }
 
   try {
@@ -95,13 +95,58 @@ export async function planFromIntent(intent, contextSummary, nodes = []) {
 
     const args = JSON.parse(functionCall.arguments);
     
+    console.log('📦 AI returned patch args:', JSON.stringify(args, null, 2));
+    
+    // Validate args structure
+    if (!args.ops || !Array.isArray(args.ops) || args.ops.length === 0) {
+      console.warn('⚠️ AI returned invalid ops array, falling back to rule-based planner');
+      return planFromIntentFallback(intent, contextSummary, nodes || []);
+    }
+    
+    // Normalize all operations first
+    const normalizedOps = args.ops
+      .filter(op => op && op.op) // Filter out invalid operations
+      .map(op => {
+        // Check if AI returned node properties at top level instead of nested
+        if (op.op === 'ADD_NODE' && !op.node && (op.id || op.kind || op.label || op.data)) {
+          console.warn('⚠️ AI returned ADD_NODE with node properties at top level, restructuring...');
+          op.node = {
+            id: op.id,
+            type: op.type || 'default',
+            position: op.position || { x: 100, y: 100 },
+            data: op.data || {
+              kind: op.kind || 'action.http.request',
+              label: op.label || 'Untitled Node',
+              config: op.config || {}
+            }
+          };
+        }
+        return normalizePatch(op);
+      })
+      .filter(op => {
+        // Filter out empty BULK patches and invalid patches
+        if (!op || !op.op) return false;
+        if (op.op === 'BULK' && (!op.ops || op.ops.length === 0)) return false;
+        if (op.op === 'ADD_NODE' && !op.node) {
+          console.error('❌ Filtering out ADD_NODE patch without node:', op);
+          return false;
+        }
+        return true;
+      });
+    
+    // If no valid operations after normalization, fall back to rule-based planner
+    if (normalizedOps.length === 0) {
+      console.warn('⚠️ No valid operations after normalization, falling back to rule-based planner');
+      return planFromIntentFallback(intent, contextSummary, nodes || []);
+    }
+    
     // Convert to GraphPatch format
-    if (args.ops.length === 1) {
-      return normalizePatch(args.ops[0]);
+    if (normalizedOps.length === 1) {
+      return normalizedOps[0];
     }
     
     // Post-process: match node IDs from labels if needed
-    const processedOps = args.ops.map(op => {
+    const processedOps = normalizedOps.map(op => {
       if ((op.op === 'REMOVE_NODE' || op.op === 'UPDATE_NODE') && op.id) {
         // Try to match by ID first
         let matchedNode = nodes.find(n => n.id === op.id);
@@ -139,13 +184,13 @@ export async function planFromIntent(intent, contextSummary, nodes = []) {
     });
     
     if (processedOps.length === 1) {
-      return normalizePatch(processedOps[0]);
+      return processedOps[0];
     }
     
-    return { op: "BULK", ops: processedOps.map(normalizePatch) };
+    return { op: "BULK", ops: processedOps };
   } catch (error) {
     console.error("Error planning from intent:", error);
-    return planFromIntentFallback(intent, contextSummary, nodes);
+    return planFromIntentFallback(intent, contextSummary, nodes || []);
   }
 }
 
@@ -155,13 +200,90 @@ export async function planFromIntent(intent, contextSummary, nodes = []) {
  * @returns {import('./graphTypes').GraphPatch}
  */
 function normalizePatch(patch) {
+  if (!patch || !patch.op) {
+    console.error('⚠️ Invalid patch (missing op):', patch);
+    return patch;
+  }
+  
+  // Normalize ADD_EDGE operations - handle both formats
+  if (patch.op === 'ADD_EDGE') {
+    // If AI returned from/to at top level, convert to edge format
+    if (patch.from && patch.to && !patch.edge) {
+      // Keep from/to format - applyPatch will handle it
+      // Just ensure we have the required properties
+      if (!patch.from || !patch.to) {
+        console.error('⚠️ ADD_EDGE patch missing from/to:', patch);
+        return { op: 'BULK', ops: [] };
+      }
+    } else if (patch.edge) {
+      // Standard format - ensure edge has required properties
+      if (!patch.edge.source || !patch.edge.target) {
+        console.error('⚠️ ADD_EDGE patch.edge missing source/target:', patch);
+        return { op: 'BULK', ops: [] };
+      }
+    } else {
+      console.error('⚠️ ADD_EDGE patch missing edge or from/to:', patch);
+      return { op: 'BULK', ops: [] };
+    }
+  }
+  
   // Ensure node has proper structure
-  if (patch.op === 'ADD_NODE' && patch.node) {
+  if (patch.op === 'ADD_NODE') {
+    if (!patch.node) {
+      console.error('⚠️ ADD_NODE patch missing node property:', patch);
+      // Try to create a default node if we have some info
+      if (patch.id || patch.kind || patch.label) {
+        console.warn('⚠️ Attempting to reconstruct node from patch properties');
+        patch.node = createNode(patch.kind || 'action.http.request', {
+          id: patch.id,
+          data: {
+            label: patch.label || patch.id || 'Untitled Node',
+            ...(patch.data || {})
+          },
+          position: patch.position || { x: 100, y: 100 }
+        });
+      } else {
+        console.error('❌ Cannot normalize ADD_NODE patch - no node and no fallback info');
+        // Return a valid but empty patch that will be caught by validation
+        return { op: 'BULK', ops: [] };
+      }
+    }
+    
+    // Ensure node has all required properties
+    if (!patch.node.id) {
+      console.warn('⚠️ Node missing id, generating one');
+      patch.node.id = `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+    
     if (!patch.node.data) {
       patch.node.data = {};
     }
+    
+    if (!patch.node.data.kind) {
+      console.warn('⚠️ Node missing kind:', patch.node);
+      // Try to infer from label or set default
+      patch.node.data.kind = 'action.http.request';
+    }
+    
     if (patch.node.data.kind && !patch.node.data.role) {
       patch.node.data.role = getNodeRole(patch.node.data.kind);
+    }
+    
+    if (!patch.node.position) {
+      patch.node.position = { x: 100, y: 100 };
+    }
+    
+    if (!patch.node.type) {
+      patch.node.type = 'default';
+    }
+    
+    if (!patch.node.data.label || patch.node.data.label.trim() === '') {
+      patch.node.data.label = getDefaultLabel(patch.node.data.kind) || patch.node.data.kind || 'Untitled Node';
+      console.log('📝 Setting default label in normalizePatch:', patch.node.data.kind, '→', patch.node.data.label);
+    }
+    
+    if (!patch.node.data.config) {
+      patch.node.data.config = {};
     }
   }
   
@@ -198,6 +320,98 @@ function planFromIntentFallback(intent, contextSummary, nodes = []) {
         // Create placeholder node IDs (will fail if no actual nodes, but better than nothing)
         existingNodes.push(...steps.map((label, idx) => ({ id: `step_${idx}`, label })));
       }
+    }
+  }
+  
+  // If no existing workflow, create a new one from scratch
+  const isEmptyWorkflow = existingNodes.length === 0 && contextSummary.includes('Empty workflow');
+  if (isEmptyWorkflow) {
+    console.log('🆕 Creating new workflow from intent:', intent);
+    
+    // Create trigger node based on intent
+    let triggerNode = null;
+    let cursorX = 100;
+    const y = 100;
+    
+    if (lower.includes('facebook') && (lower.includes('comment') || lower.includes('reply'))) {
+      triggerNode = createNode('trigger.facebook.comment', {
+        position: { x: cursorX, y },
+        data: { label: 'Facebook Comment' }
+      });
+      patches.push({ op: 'ADD_NODE', node: triggerNode });
+      cursorX += 250;
+    } else if (lower.includes('schedule') || lower.includes('daily') || lower.includes('weekly')) {
+      triggerNode = createNode('trigger.scheduler.cron', {
+        position: { x: cursorX, y },
+        data: { 
+          label: lower.includes('daily') ? 'Daily Schedule' : 'Scheduled Trigger',
+          config: { schedule: lower.includes('daily') ? '0 0 * * *' : '0 * * * *' }
+        }
+      });
+      patches.push({ op: 'ADD_NODE', node: triggerNode });
+      cursorX += 250;
+    }
+    
+    // Create action nodes based on intent
+    const actionNodes = [];
+    
+    if (lower.includes('facebook') && (lower.includes('reply') || lower.includes('comment'))) {
+      const node = createNode('action.facebook.reply', {
+        position: { x: cursorX, y },
+        data: { label: 'Reply to Facebook Comment' }
+      });
+      actionNodes.push(node);
+      cursorX += 250;
+    }
+    
+    if (lower.includes('facebook') && (lower.includes('dm') || lower.includes('direct message'))) {
+      const node = createNode('action.facebook.dm', {
+        position: { x: cursorX, y },
+        data: { label: 'Send Facebook DM' }
+      });
+      actionNodes.push(node);
+      cursorX += 250;
+    }
+    
+    if (lower.includes('sheet') || lower.includes('google')) {
+      const node = createNode('action.sheets.appendRow', {
+        position: { x: cursorX, y },
+        data: { label: 'Add to Google Sheets' }
+      });
+      actionNodes.push(node);
+      cursorX += 250;
+    }
+    
+    if (lower.includes('email')) {
+      const node = createNode('action.email.send', {
+        position: { x: cursorX, y },
+        data: { label: 'Send Email' }
+      });
+      actionNodes.push(node);
+      cursorX += 250;
+    }
+    
+    // Add all action nodes
+    actionNodes.forEach(node => {
+      patches.push({ op: 'ADD_NODE', node });
+    });
+    
+    // Connect nodes in sequence
+    const allNodes = triggerNode ? [triggerNode, ...actionNodes] : actionNodes;
+    for (let i = 0; i < allNodes.length - 1; i++) {
+      patches.push({ 
+        op: 'ADD_EDGE', 
+        edge: connect(allNodes[i].id, allNodes[i + 1].id) 
+      });
+    }
+    
+    // If we created nodes, return the patches
+    if (patches.length > 0) {
+      console.log(`✅ Created new workflow with ${patches.length} operations`);
+      if (patches.length === 1) {
+        return patches[0];
+      }
+      return { op: 'BULK', ops: patches };
     }
   }
   

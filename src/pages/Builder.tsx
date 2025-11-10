@@ -131,18 +131,38 @@ export default function Builder(props: BuilderProps = {}) {
               
               // Use patch-based system
               setTimeout(async () => {
-                const patch = await planFromIntent(userMessage, aiContext.currentSummary, nodes)
-                const result = applyPatch(patch)
-                
-                if (result.ok) {
+                try {
+                  const patch = await planFromIntent(userMessage, aiContext.currentSummary, nodes)
+                  
+                  if (!patch) {
+                    console.error('❌ planFromIntent returned null/undefined');
+                    setMessages((prev) => [
+                      ...prev,
+                      { id: Date.now() + 1, role: 'assistant', text: 'I couldn\'t generate a valid workflow change. Could you please try rephrasing your request?' },
+                    ])
+                    return
+                  }
+                  
+                  console.log('📦 Applying patch:', patch);
+                  const result = applyPatch(patch)
+                  
+                  if (result.ok) {
+                    setMessages((prev) => [
+                      ...prev,
+                      { id: Date.now() + 1, role: 'assistant', text: result.nodes.length > nodes.length ? 'Added nodes to your workflow.' : 'Updated your workflow.' },
+                    ])
+                  } else {
+                    console.error('❌ Patch application failed:', result.issues);
+                    setMessages((prev) => [
+                      ...prev,
+                      { id: Date.now() + 1, role: 'assistant', text: `Failed to update workflow: ${result.issues?.join(', ')}` },
+                    ])
+                  }
+                } catch (error) {
+                  console.error('❌ Error in workflow generation:', error);
                   setMessages((prev) => [
                     ...prev,
-                    { id: Date.now() + 1, role: 'assistant', text: result.nodes.length > nodes.length ? 'Added nodes to your workflow.' : 'Updated your workflow.' },
-                  ])
-                } else {
-                  setMessages((prev) => [
-                    ...prev,
-                    { id: Date.now() + 1, role: 'assistant', text: `Failed to update workflow: ${result.issues?.join(', ')}` },
+                    { id: Date.now() + 1, role: 'assistant', text: 'I encountered an error while generating the workflow. Please try again.' },
                   ])
                 }
               }, 1000)

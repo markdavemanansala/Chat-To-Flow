@@ -229,9 +229,32 @@ export const useAppStore = create((set, get) => {
         console.log(`✅ Patch applied: ${nodeCountBefore} → ${nodeCountAfter} nodes`);
         console.log('📦 New node IDs:', result.nodes.map(n => n.id));
         
+        // Validate nodes before creating new arrays
+        const validResultNodes = (result.nodes || []).filter(n => {
+          if (!n) {
+            console.warn('⚠️ Filtering out null/undefined node');
+            return false;
+          }
+          if (!n.id) {
+            console.warn('⚠️ Filtering out node without id:', n);
+            return false;
+          }
+          if (!n.data) {
+            console.warn('⚠️ Filtering out node without data:', n.id);
+            return false;
+          }
+          return true;
+        });
+        
+        console.log('📦 Validating result nodes:', {
+          originalCount: result.nodes?.length || 0,
+          validCount: validResultNodes.length,
+          validNodeIds: validResultNodes.map(n => n.id)
+        });
+        
         // Create completely new arrays with new references for each node/edge
-        const newNodes = result.nodes.map(n => ({ ...n, data: { ...n.data } }));
-        const newEdges = result.edges.map(e => ({ ...e }));
+        const newNodes = validResultNodes.map(n => ({ ...n, data: { ...n.data } }));
+        const newEdges = (result.edges || []).map(e => ({ ...e }));
         
         // CRITICAL: Create completely new array references
         // Zustand uses shallow equality - new array reference = re-render trigger
@@ -245,7 +268,8 @@ export const useAppStore = create((set, get) => {
         console.log('📦 Setting store with new arrays:', {
           nodesCount: finalNodes.length,
           edgesCount: finalEdges.length,
-          nodeIds: finalNodes.map(n => n.id)
+          nodeIds: finalNodes.map(n => n.id),
+          edgeIds: finalEdges.map(e => e.id)
         });
         
         // Use set to trigger Zustand subscribers

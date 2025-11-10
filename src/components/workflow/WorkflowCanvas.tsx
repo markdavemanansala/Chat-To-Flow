@@ -10,6 +10,8 @@ import ReactFlow, {
   ConnectionMode,
   useReactFlow,
   ReactFlowProvider,
+  useNodesState,
+  useEdgesState,
   Handle,
   Position,
 } from 'reactflow'
@@ -24,6 +26,7 @@ import { useToast } from '@/components/ToastProvider'
 import { saveWorkflowDraft } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { checkNodeCredentials } from '@/utils/credentials'
+import SimpleFlowView from './SimpleFlowView'
 
 // Helper function to get a meaningful label from node kind
 function getNodeLabel(data) {
@@ -175,6 +178,7 @@ function CustomNode({ data, selected, id }) {
 
 // Create node types - static to prevent React Flow warnings
 // Highlighting is handled inside CustomNode via props
+// Define nodeTypes outside component to prevent recreation on each render
 const nodeTypes = {
   default: CustomNode,
 };
@@ -191,7 +195,7 @@ interface WorkflowCanvasInnerProps {
  * @param {Function} props.onNodeSelect - Callback when a node is selected
  */
 function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
-  // Store state - single source of truth
+  // Store state - Zustand store (source of truth for persistence)
   const storeNodes = useNodes()
   const storeEdges = useEdges()
   const workflowSummary = useWorkflowSummary()
@@ -201,14 +205,21 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
   const setWorkflow = useSetWorkflow()
   const { showToast } = useToast()
   
+  // React Flow internal state - for smooth UI interactions
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState([])
+  const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState([])
+  
   // Local UI state
   const [selectedNodeIds, setSelectedNodeIds] = useState(new Set())
   const [selectedEdgeIds, setSelectedEdgeIds] = useState(new Set())
   const [isSaving, setIsSaving] = useState(false)
   const [highlightedNodes, setHighlightedNodes] = useState(new Set())
+  const [viewMode, setViewMode] = useState<'flow' | 'simple'>('simple') // Default to simple view
   const autosaveTimerRef = useRef(null)
   const lastSavedRef = useRef(null)
   const positionDebounceTimerRef = useRef(null)
+  const prevNodeIdsRef = useRef('')
+  const prevEdgeIdsRef = useRef('')
 
   const rf = useReactFlow()
 
@@ -229,48 +240,38 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
   }, [storeNodes.length, storeEdges.length, workflowSummary, setFlow])
 
   /**
-   * CRITICAL: Force React Flow to update when store changes
-   * Track structure changes to prevent unnecessary updates
-   */
-  const prevStructureRef = useRef('')
-  useEffect(() => {
-    if (!rf) return
-    
-    // Create structure signature
-    const structure = `${storeNodes.map(n => n.id).sort().join(',')}|${storeEdges.map(e => e.id).sort().join(',')}`
-    
-    // Only update if structure actually changed
-    if (structure !== prevStructureRef.current) {
-      console.log('🔄 Structure changed - forcing React Flow update:', storeNodes.length, 'nodes,', storeEdges.length, 'edges')
-      console.log('🔄 Node IDs:', storeNodes.map(n => n.id))
-      
-      // Use React Flow's imperative API to force update
-      rf.setNodes([...storeNodes])
-      rf.setEdges([...storeEdges])
-      prevStructureRef.current = structure
-      
-      console.log('✅ React Flow updated via rf.setNodes/setEdges')
-    }
-  }, [storeNodes, storeEdges, rf])
-  
-  /**
-   * Listen to patch-applied events and force React Flow update
-   * This ensures immediate visual feedback when patches are applied
+   * Sync Zustand store to React Flow internal state
+   * This ensures React Flow displays the latest nodes/edges from the store
    */
   useEffect(() => {
-    const unsubscribe = onPatchApplied(({ patch, result }) => {
-      if (result.ok && rf) {
-        console.log('🔄 Patch applied - forcing React Flow update')
-        const currentNodes = useAppStore.getState().nodes
-        const currentEdges = useAppStore.getState().edges
-        rf.setNodes(currentNodes)
-        rf.setEdges(currentEdges)
-        console.log('✅ React Flow updated after patch')
+    const currentNodeIds = storeNodes.map(n => n.id).sort().join(',')
+    const currentEdgeIds = storeEdges.map(e => `${e.id}:${e.source}->${e.target}`).sort().join(',')
+    
+    const nodesChanged = currentNodeIds !== prevNodeIdsRef.current
+    const edgesChanged = currentEdgeIds !== prevEdgeIdsRef.current
+    
+    if (nodesChanged || edgesChanged || prevNodeIdsRef.current === '') {
+      console.log('🔄 Syncing store to React Flow:', {
+        nodesCount: storeNodes.length,
+        edgesCount: storeEdges.length,
+        nodeIds: storeNodes.map(n => n.id)
+      })
+      
+      // Update React Flow state with new array references
+      setRfNodes([...storeNodes])
+      setRfEdges([...storeEdges])
+      
+      prevNodeIdsRef.current = currentNodeIds
+      prevEdgeIdsRef.current = currentEdgeIds
+      
+      // Fit view after update
+      if (storeNodes.length > 0) {
+        setTimeout(() => {
+          rf.fitView({ padding: 0.2, duration: 300 })
+        }, 100)
       }
-    })
-    
-    return unsubscribe
-  }, [onPatchApplied, rf])
+    }
+  }, [storeNodes, storeEdges, setRfNodes, setRfEdges, rf])
 
 
   // Highlight nodes when patches are applied
@@ -374,11 +375,11 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
 
   // Track selected nodes/edges
   useEffect(() => {
-    const selectedNodes = storeNodes.filter(n => n.selected).map(n => n.id)
-    const selectedEdges = storeEdges.filter(e => e.selected).map(e => e.id)
+    const selectedNodes = rfNodes.filter(n => n.selected).map(n => n.id)
+    const selectedEdges = rfEdges.filter(e => e.selected).map(e => e.id)
     setSelectedNodeIds(new Set(selectedNodes))
     setSelectedEdgeIds(new Set(selectedEdges))
-  }, [storeNodes, storeEdges])
+  }, [rfNodes, rfEdges])
 
   /**
    * Handle node changes from React Flow
@@ -387,49 +388,51 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
    */
   /**
    * Handle node changes from React Flow (manual edits)
-   * Updates store directly - Zustand is single source of truth
+   * React Flow handles its own state, we sync back to Zustand store
    * 
    * @param {Array} changes - React Flow change array
    */
-  const onNodesChange = useCallback((changes) => {
-    // Apply changes to current store nodes
-    const next = applyNodeChanges(changes, storeNodes);
+  const handleNodesChange = useCallback((changes) => {
+    // Let React Flow update its internal state first
+    onNodesChange(changes)
     
-    // Separate significant changes (add/remove/update) from UI-only changes (select/position)
+    // Then sync back to Zustand store (debounced for position changes)
     const significantChanges = changes.filter(c => 
       c.type !== 'select' && c.type !== 'position'
-    );
-    
-    // Handle position changes separately with debouncing to prevent lag
-    const positionChanges = changes.filter(c => c.type === 'position');
+    )
+    const positionChanges = changes.filter(c => c.type === 'position')
     
     if (significantChanges.length > 0) {
-      // Immediate update for structural changes (add/remove/update)
-      console.log('🖼️ Manual edit detected:', significantChanges.map(c => c.type));
-      setFlow(next, storeEdges);
+      // Immediate update for structural changes
+      const next = applyNodeChanges(changes, rfNodes)
+      setFlow(next, rfEdges)
     } else if (positionChanges.length > 0) {
-      // Debounced update for position changes (prevents lag during dragging)
+      // Debounced update for position changes
       if (positionDebounceTimerRef.current) {
-        clearTimeout(positionDebounceTimerRef.current);
+        clearTimeout(positionDebounceTimerRef.current)
       }
       positionDebounceTimerRef.current = setTimeout(() => {
-        setFlow(next, storeEdges);
-        positionDebounceTimerRef.current = null;
-      }, 300);
+        const next = applyNodeChanges(changes, rfNodes)
+        setFlow(next, rfEdges)
+        positionDebounceTimerRef.current = null
+      }, 300)
     }
-    // Selection changes don't need to update the store
-  }, [storeNodes, storeEdges, setFlow, positionDebounceTimerRef])
+  }, [rfNodes, rfEdges, setFlow, onNodesChange, positionDebounceTimerRef])
   
   /**
    * Handle edge changes from React Flow (manual edits)
-   * Updates store directly
+   * React Flow handles its own state, we sync back to Zustand store
    * 
    * @param {Array} changes - React Flow edge change array
    */
-  const onEdgesChange = useCallback((changes) => {
-    const next = applyEdgeChanges(changes, storeEdges)
-    setFlow(storeNodes, next)
-  }, [storeNodes, storeEdges, setFlow])
+  const handleEdgesChange = useCallback((changes) => {
+    // Let React Flow update its internal state first
+    onEdgesChange(changes)
+    
+    // Then sync back to Zustand store
+    const next = applyEdgeChanges(changes, rfEdges)
+    setFlow(rfNodes, next)
+  }, [rfNodes, rfEdges, setFlow, onEdgesChange])
   
   /**
    * Handle new edge connections from React Flow
@@ -438,9 +441,10 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
    * @param {Object} params - Connection parameters from React Flow
    */
   const onConnect = useCallback((params) => {
-    const next = addEdge(params, storeEdges)
-    setFlow(storeNodes, next)
-  }, [storeNodes, storeEdges, setFlow])
+    const next = addEdge(params, rfEdges)
+    setRfEdges(next)
+    setFlow(rfNodes, next)
+  }, [rfNodes, rfEdges, setRfEdges, setFlow])
 
   const handleFit = useCallback(() => {
     rf.fitView({ padding: 0.2, duration: 300 })
@@ -608,8 +612,30 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
     <>
       {/* Toolbar - Workflow manipulation controls */}
       <div className="workflow-toolbar">
-        <Button size="sm" variant="outline" onClick={handleFit}>Fit</Button>
-        <Button size="sm" variant="outline" onClick={handleCenter}>Center</Button>
+        {/* View Mode Toggle */}
+        <div className="flex items-center gap-2 mr-4 border-r pr-4">
+          <Button
+            size="sm"
+            variant={viewMode === 'simple' ? 'default' : 'outline'}
+            onClick={() => setViewMode('simple')}
+          >
+            📋 Simple View
+          </Button>
+          <Button
+            size="sm"
+            variant={viewMode === 'flow' ? 'default' : 'outline'}
+            onClick={() => setViewMode('flow')}
+          >
+            🗺️ Flow View
+          </Button>
+        </div>
+
+        {viewMode === 'flow' && (
+          <>
+            <Button size="sm" variant="outline" onClick={handleFit}>Fit</Button>
+            <Button size="sm" variant="outline" onClick={handleCenter}>Center</Button>
+          </>
+        )}
         <Button size="sm" variant="outline" onClick={handleExport}>Export JSON</Button>
         <Button size="sm" variant="outline" onClick={handleImport}>Import JSON</Button>
         <Button size="sm" variant="outline" onClick={handleValidate}>Validate Flow</Button>
@@ -622,22 +648,28 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
           {isSaving ? 'Saving...' : 'Save Draft'}
         </Button>
         <Button size="sm" variant="destructive" onClick={handleReset}>Reset</Button>
-        <div className="workflow-toolbar-help">
-          <kbd className="px-1 py-0.5 bg-muted rounded">Del</kbd> / <kbd className="px-1 py-0.5 bg-muted rounded">Backspace</kbd> to delete • 
-          <kbd className="px-1 py-0.5 bg-muted rounded">Ctrl+S</kbd> to save • 
-          <kbd className="px-1 py-0.5 bg-muted rounded">Ctrl+E</kbd> to export
-        </div>
+        {viewMode === 'flow' && (
+          <div className="workflow-toolbar-help">
+            <kbd className="px-1 py-0.5 bg-muted rounded">Del</kbd> / <kbd className="px-1 py-0.5 bg-muted rounded">Backspace</kbd> to delete • 
+            <kbd className="px-1 py-0.5 bg-muted rounded">Ctrl+S</kbd> to save • 
+            <kbd className="px-1 py-0.5 bg-muted rounded">Ctrl+E</kbd> to export
+          </div>
+        )}
       </div>
 
-      {/* Canvas - React Flow visualization of the workflow */}
-      <div className="workflow-canvas-wrapper">
+      {/* Canvas - Conditional rendering based on view mode */}
+      {viewMode === 'simple' ? (
+        <div className="workflow-canvas-wrapper" style={{ minHeight: '500px' }}>
+          <SimpleFlowView onNodeSelect={onNodeSelect} />
+        </div>
+      ) : (
+        <div className="workflow-canvas-wrapper">
         <ReactFlow
-          key={`${storeNodes.map(n => n.id).sort().join(',')}-${storeEdges.map(e => e.id).sort().join(',')}`}
-          nodes={storeNodes}
-          edges={storeEdges}
+          nodes={rfNodes}
+          edges={rfEdges}
           nodeTypes={nodeTypes}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
+          onNodesChange={handleNodesChange}
+          onEdgesChange={handleEdgesChange}
           onConnect={onConnect}
           onNodeDoubleClick={onNodeDoubleClick}
           onNodeClick={onNodeClick}
@@ -676,7 +708,6 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
           snapToGrid
           snapGrid={[15, 15]}
           deleteKeyCode="Delete"
-          nodesDeletable={true}
           nodesDraggable={true}
           nodesConnectable={true}
           elementsSelectable={true}
@@ -685,7 +716,8 @@ function WorkflowCanvasInner({ onNodeSelect }: WorkflowCanvasInnerProps) {
           <MiniMap />
           <Controls />
         </ReactFlow>
-      </div>
+        </div>
+      )}
     </>
   )
 }
