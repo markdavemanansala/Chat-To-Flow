@@ -99,6 +99,20 @@ export function generateNodeLabel(kind: NodeKind, config: NodeConfig = {}): stri
       }
       break;
 
+    case 'trigger.sheets.newRow':
+      base = 'Sheets: New Row';
+      if (config.sheetName) {
+        suffix = ` – ${truncate(String(config.sheetName), 10)}`;
+      }
+      break;
+
+    case 'trigger.sheets.update':
+      base = 'Sheets: Update';
+      if (config.sheetName) {
+        suffix = ` – ${truncate(String(config.sheetName), 10)}`;
+      }
+      break;
+
     case 'action.telegram.sendMessage':
       base = 'Send Telegram';
       if (config.message) {
@@ -107,6 +121,72 @@ export function generateNodeLabel(kind: NodeKind, config: NodeConfig = {}): stri
       } else {
         suffix = ' – Message';
       }
+      break;
+
+    case 'action.telegram.sendPhoto':
+      base = 'Telegram Photo';
+      if (config.caption) {
+        suffix = ` – ${truncate(String(config.caption), 10)}`;
+      }
+      break;
+
+    case 'action.telegram.sendVideo':
+      base = 'Telegram Video';
+      if (config.caption) {
+        suffix = ` – ${truncate(String(config.caption), 10)}`;
+      }
+      break;
+
+    case 'action.telegram.sendAudio':
+      base = 'Telegram Audio';
+      if (config.title) {
+        suffix = ` – ${truncate(String(config.title), 10)}`;
+      }
+      break;
+
+    case 'action.telegram.sendDocument':
+      base = 'Telegram Document';
+      break;
+
+    case 'action.telegram.sendLocation':
+      base = 'Telegram Location';
+      break;
+
+    case 'action.telegram.sendVenue':
+      base = 'Telegram Venue';
+      if (config.title) {
+        suffix = ` – ${truncate(String(config.title), 10)}`;
+      }
+      break;
+
+    case 'action.telegram.sendContact':
+      base = 'Telegram Contact';
+      if (config.firstName) {
+        suffix = ` – ${truncate(String(config.firstName), 10)}`;
+      }
+      break;
+
+    case 'action.telegram.sendPoll':
+      base = 'Telegram Poll';
+      if (config.question) {
+        suffix = ` – ${truncate(String(config.question), 10)}`;
+      }
+      break;
+
+    case 'action.telegram.sendSticker':
+      base = 'Telegram Sticker';
+      break;
+
+    case 'action.telegram.editMessage':
+      base = 'Edit Telegram';
+      break;
+
+    case 'action.telegram.deleteMessage':
+      base = 'Delete Telegram';
+      break;
+
+    case 'action.telegram.getUpdates':
+      base = 'Get Telegram Updates';
       break;
 
     case 'action.email.send':
@@ -128,6 +208,31 @@ export function generateNodeLabel(kind: NodeKind, config: NodeConfig = {}): stri
         suffix = ` – ${sheetName}`;
       } else {
         suffix = ' – Log Data';
+      }
+      break;
+
+    case 'action.sheets.readRows':
+      base = 'Read Sheets';
+      if (config.range) {
+        const range = String(config.range);
+        const sheetName = range.split('!')[0];
+        suffix = ` – ${sheetName}`;
+      }
+      break;
+
+    case 'action.sheets.updateCell':
+      base = 'Update Cell';
+      if (config.range) {
+        suffix = ` – ${truncate(String(config.range), 10)}`;
+      }
+      break;
+
+    case 'action.sheets.clearRange':
+      base = 'Clear Sheets';
+      if (config.range) {
+        const range = String(config.range);
+        const sheetName = range.split('!')[0];
+        suffix = ` – ${sheetName}`;
       }
       break;
 

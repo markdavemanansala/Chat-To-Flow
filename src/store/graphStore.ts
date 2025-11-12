@@ -4,10 +4,13 @@
 
 import { create } from 'zustand';
 import type { Node, Edge } from 'reactflow';
-import type { GraphPatch, PatchResult, RfNodeData } from '../types/graph';
+import type { GraphPatch, PatchResult, RfNodeData, ValidationResult } from '../types/graph';
 import { applyPatch as applyGraphPatch } from '../workflow/patches';
 import { generateNodeLabel } from '../workflow/labeler';
 import { getNodeRole } from '../workflow/graphTypes';
+import { validateGraph } from '../workflow/validate';
+import { saveWorkflowDraft, loadWorkflowDraft, clearWorkflowDraft } from '../lib/storage';
+import { debounce } from '../lib/debounce';
 
 // Event bus for graph events
 class EventBus {
@@ -92,10 +95,13 @@ interface GraphStore {
   edges: Edge[];
   graphName: string;
   historyRef: { current: ReturnType<typeof createHistory> };
+  highlightedNodeIds: Set<string>; // For patch highlight glow
+  highlightedEdgeIds: Set<string>;
 
   // Actions
   setFlow: (nodes: Node<RfNodeData>[], edges: Edge[]) => void;
   setEdges: (edges: Edge[]) => void;
+  upsertNode: (node: Node<RfNodeData>) => void;
   applyPatch: (patch: GraphPatch) => PatchResult & { nodes: Node<RfNodeData>[]; edges: Edge[] };
   undo: () => boolean;
   redo: () => boolean;
@@ -103,6 +109,9 @@ interface GraphStore {
   canRedo: () => boolean;
   resetFlow: () => void;
   setGraphName: (name: string) => void;
+  validateGraph: () => ValidationResult;
+  highlightPatchAffected: (nodeIds: string[], edgeIds: string[]) => void;
+  clearHighlights: () => void;
 
   // Event bus
   onGraphChange: (callback: (data: { nodes: Node<RfNodeData>[]; edges: Edge[] }) => void) => () => void;
@@ -112,13 +121,36 @@ interface GraphStore {
 
 export const useGraphStore = create<GraphStore>((set, get) => {
   const historyRef = { current: createHistory() };
+  
+  // Debounced autosave (1 second)
+  const autosave = debounce(() => {
+    const state = get();
+    saveWorkflowDraft({
+      name: state.graphName,
+      nodes: state.nodes,
+      edges: state.edges,
+    });
+  }, 1000);
+  
+  // Load draft on initialization
+  const draft = loadWorkflowDraft();
+  const initialNodes = draft?.nodes || [];
+  const initialEdges = draft?.edges || [];
+  const initialName = draft?.name || 'New Workflow';
+  
+  if (draft) {
+    // Initialize history with draft data
+    historyRef.current.push({ nodes: initialNodes, edges: initialEdges });
+  }
 
   return {
-    // Initial state
-    nodes: [],
-    edges: [],
-    graphName: 'New Workflow',
+    // Initial state (load from draft if available)
+    nodes: initialNodes,
+    edges: initialEdges,
+    graphName: initialName,
     historyRef,
+    highlightedNodeIds: new Set<string>(),
+    highlightedEdgeIds: new Set<string>(),
 
     // Set flow (nodes + edges)
     setFlow: (nodes, edges) => {
@@ -134,6 +166,7 @@ export const useGraphStore = create<GraphStore>((set, get) => {
         set({ nodes, edges });
         historyRef.current.push({ nodes, edges });
         eventBus.emit('graph-changed', { nodes, edges });
+        autosave(); // Autosave on change
       }
     },
 
@@ -143,6 +176,31 @@ export const useGraphStore = create<GraphStore>((set, get) => {
       set({ edges });
       historyRef.current.push({ nodes: state.nodes, edges });
       eventBus.emit('graph-changed', { nodes: state.nodes, edges });
+      autosave(); // Autosave on change
+    },
+
+    // Upsert node (insert or update)
+    upsertNode: (node) => {
+      const state = get();
+      const existingIndex = state.nodes.findIndex(n => n.id === node.id);
+      let newNodes: Node<RfNodeData>[];
+      
+      if (existingIndex >= 0) {
+        newNodes = [...state.nodes];
+        newNodes[existingIndex] = node;
+      } else {
+        newNodes = [...state.nodes, node];
+      }
+      
+      // Ensure role is set
+      if (!newNodes[newNodes.length - 1].data?.role && newNodes[newNodes.length - 1].data?.kind) {
+        newNodes[newNodes.length - 1].data.role = getNodeRole(newNodes[newNodes.length - 1].data.kind);
+      }
+      
+      set({ nodes: newNodes });
+      historyRef.current.push({ nodes: newNodes, edges: state.edges });
+      eventBus.emit('graph-changed', { nodes: newNodes, edges: state.edges });
+      autosave(); // Autosave on change
     },
 
     // Apply patch (main entry point for all graph changes)
@@ -196,8 +254,52 @@ export const useGraphStore = create<GraphStore>((set, get) => {
         set({ nodes: newNodes, edges: newEdges });
         historyRef.current.push({ nodes: newNodes, edges: newEdges });
         
+        // Extract affected node/edge IDs for highlighting
+        const affectedNodeIds: string[] = [];
+        const affectedEdgeIds: string[] = [];
+        
+        if (patch.op === 'ADD_NODE' && patch.node) {
+          affectedNodeIds.push(patch.node.id);
+        } else if (patch.op === 'UPDATE_NODE' && patch.id) {
+          affectedNodeIds.push(patch.id);
+        } else if (patch.op === 'REMOVE_NODE' && patch.id) {
+          // Don't highlight removed nodes
+        } else if (patch.op === 'ADD_EDGE' && patch.edge) {
+          affectedEdgeIds.push(patch.edge.id);
+          affectedNodeIds.push(patch.edge.source, patch.edge.target);
+        } else if (patch.op === 'REMOVE_EDGE' && patch.id) {
+          // Don't highlight removed edges
+        } else if (patch.op === 'REWIRE') {
+          if (patch.edgeId) affectedEdgeIds.push(patch.edgeId);
+          if (patch.from) affectedNodeIds.push(patch.from);
+          if (patch.to) affectedNodeIds.push(patch.to);
+        } else if (patch.op === 'BULK' && patch.ops) {
+          patch.ops.forEach(op => {
+            if (op.op === 'ADD_NODE' && op.node) affectedNodeIds.push(op.node.id);
+            if (op.op === 'UPDATE_NODE' && op.id) affectedNodeIds.push(op.id);
+            if (op.op === 'ADD_EDGE' && op.edge) {
+              affectedEdgeIds.push(op.edge.id);
+              affectedNodeIds.push(op.edge.source, op.edge.target);
+            }
+            if (op.op === 'REWIRE') {
+              if (op.edgeId) affectedEdgeIds.push(op.edgeId);
+              if (op.from) affectedNodeIds.push(op.from);
+              if (op.to) affectedNodeIds.push(op.to);
+            }
+          });
+        }
+        
+        // Highlight affected nodes/edges for 800ms
+        if (affectedNodeIds.length > 0 || affectedEdgeIds.length > 0) {
+          get().highlightPatchAffected(affectedNodeIds, affectedEdgeIds);
+          setTimeout(() => {
+            get().clearHighlights();
+          }, 800);
+        }
+        
         eventBus.emit('graph-changed', { nodes: newNodes, edges: newEdges });
         eventBus.emit('patch-applied', { patch, result });
+        autosave(); // Autosave on change
         
         console.log('🔧 State updated, new state:', {
           nodes: get().nodes.length,
@@ -240,11 +342,34 @@ export const useGraphStore = create<GraphStore>((set, get) => {
       set({ nodes: [], edges: [] });
       historyRef.current.push({ nodes: [], edges: [] });
       eventBus.emit('graph-changed', { nodes: [], edges: [] });
+      clearWorkflowDraft();
     },
 
     // Set graph name
     setGraphName: (name: string) => {
       set({ graphName: name });
+    },
+
+    // Validate graph
+    validateGraph: () => {
+      const state = get();
+      return validateGraph(state.nodes, state.edges);
+    },
+
+    // Highlight patch-affected nodes/edges
+    highlightPatchAffected: (nodeIds, edgeIds) => {
+      set({
+        highlightedNodeIds: new Set(nodeIds),
+        highlightedEdgeIds: new Set(edgeIds),
+      });
+    },
+
+    // Clear highlights
+    clearHighlights: () => {
+      set({
+        highlightedNodeIds: new Set<string>(),
+        highlightedEdgeIds: new Set<string>(),
+      });
     },
 
     // Event bus access
@@ -278,6 +403,10 @@ export const useCanUndo = () => useGraphStore((state) => state.canUndo());
 export const useCanRedo = () => useGraphStore((state) => state.canRedo());
 export const useResetFlow = () => useGraphStore((state) => state.resetFlow);
 export const useSetGraphName = () => useGraphStore((state) => state.setGraphName);
+export const useUpsertNode = () => useGraphStore((state) => state.upsertNode);
+export const useValidateGraph = () => useGraphStore((state) => state.validateGraph);
+export const useHighlightedNodeIds = () => useGraphStore((state) => state.highlightedNodeIds);
+export const useHighlightedEdgeIds = () => useGraphStore((state) => state.highlightedEdgeIds);
 export const useOnGraphChange = () => useGraphStore((state) => state.onGraphChange);
 export const useOnPatchApplied = () => useGraphStore((state) => state.onPatchApplied);
 export const useOnPatchFailed = () => useGraphStore((state) => state.onPatchFailed);

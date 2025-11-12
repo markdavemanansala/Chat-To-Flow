@@ -5,14 +5,31 @@ type NodeKind =
   | 'trigger.facebook.comment'
   | 'trigger.webhook.inbound'
   | 'trigger.scheduler.cron'
+  | 'trigger.sheets.newRow'
+  | 'trigger.sheets.update'
   | 'logic.filter'
   | 'ai.guard'
   | 'ai.generate'
   | 'action.facebook.reply'
   | 'action.facebook.dm'
   | 'action.telegram.sendMessage'
+  | 'action.telegram.sendPhoto'
+  | 'action.telegram.sendVideo'
+  | 'action.telegram.sendAudio'
+  | 'action.telegram.sendDocument'
+  | 'action.telegram.sendLocation'
+  | 'action.telegram.sendVenue'
+  | 'action.telegram.sendContact'
+  | 'action.telegram.sendPoll'
+  | 'action.telegram.sendSticker'
+  | 'action.telegram.editMessage'
+  | 'action.telegram.deleteMessage'
+  | 'action.telegram.getUpdates'
   | 'action.email.send'
   | 'action.sheets.appendRow'
+  | 'action.sheets.readRows'
+  | 'action.sheets.updateCell'
+  | 'action.sheets.clearRange'
   | 'action.http.request'
 
 type NodeConfig = Record<string, any>
@@ -40,9 +57,27 @@ function titleCaseWords(words: string): string {
 function integrationsFromKinds(kinds: string[]): string[] {
   const map: Record<string, string> = {
     'trigger.facebook.comment': 'Facebook',
+    'trigger.sheets.newRow': 'Google Sheets',
+    'trigger.sheets.update': 'Google Sheets',
     'action.facebook.reply': 'Facebook',
     'action.facebook.dm': 'Facebook',
+    'action.telegram.sendMessage': 'Telegram',
+    'action.telegram.sendPhoto': 'Telegram',
+    'action.telegram.sendVideo': 'Telegram',
+    'action.telegram.sendAudio': 'Telegram',
+    'action.telegram.sendDocument': 'Telegram',
+    'action.telegram.sendLocation': 'Telegram',
+    'action.telegram.sendVenue': 'Telegram',
+    'action.telegram.sendContact': 'Telegram',
+    'action.telegram.sendPoll': 'Telegram',
+    'action.telegram.sendSticker': 'Telegram',
+    'action.telegram.editMessage': 'Telegram',
+    'action.telegram.deleteMessage': 'Telegram',
+    'action.telegram.getUpdates': 'Telegram',
     'action.sheets.appendRow': 'Google Sheets',
+    'action.sheets.readRows': 'Google Sheets',
+    'action.sheets.updateCell': 'Google Sheets',
+    'action.sheets.clearRange': 'Google Sheets',
     'action.email.send': 'Email',
     'action.http.request': 'HTTP',
   }

@@ -6,11 +6,15 @@
 import { useCallback, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { useNodes, useEdges, useResetFlow, useUndo, useRedo, useCanUndo, useCanRedo, useSetFlow } from '@/store/graphStore';
+import { useNodes, useEdges, useResetFlow, useUndo, useRedo, useCanUndo, useCanRedo, useSetFlow, useGraphName, useSetGraphName } from '@/store/graphStore';
 import { useAddToast } from '@/store/uiStore';
 import { validateGraph } from '@/workflow/validate';
 import { useViewMode } from '@/store/uiStore';
 import { executeWorkflow } from '@/workflow/executor';
+import { useKeyboardShortcuts } from '@/lib/keyboard';
+import { saveWorkflowDraft } from '@/lib/storage';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { SecretsVault } from '@/components/secrets/SecretsVault';
 
 export default function Toolbar() {
   const nodes = useNodes();
@@ -24,19 +28,54 @@ export default function Toolbar() {
   const mode = useViewMode();
   const setFlow = useSetFlow();
   const [isExecuting, setIsExecuting] = useState(false);
+  const [secretsVaultOpen, setSecretsVaultOpen] = useState(false);
 
+  const graphName = useGraphName();
+  const setGraphName = useSetGraphName();
+  
+  // Handle delete selected node
+  const handleDelete = useCallback(() => {
+    // This will be handled by the canvas components
+    // For now, just show a toast
+    addToast({ type: 'warn', text: 'Select a node and press Delete to remove it' });
+  }, [addToast]);
+  
+  // Handle save
+  const handleSave = useCallback(() => {
+    saveWorkflowDraft({
+      name: graphName,
+      nodes,
+      edges,
+    });
+    addToast({ type: 'ok', text: 'Workflow saved!' });
+  }, [graphName, nodes, edges, addToast]);
+  
   const handleExport = useCallback(() => {
-    const data = { nodes, edges };
-    const json = JSON.stringify(data, null, 2);
-    const blob = new Blob([json], { type: 'application/json' });
+    const workflow = {
+      name: graphName,
+      nodes,
+      edges,
+      exportedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(workflow, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'workflow.json';
+    a.download = `${graphName || 'workflow'}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    addToast({ type: 'ok', text: 'Workflow exported successfully' });
-  }, [nodes, edges, addToast]);
+    addToast({ type: 'ok', text: 'Workflow exported!' });
+  }, [graphName, nodes, edges, addToast]);
+  
+  // Keyboard shortcuts
+  useKeyboardShortcuts({
+    onDelete: handleDelete,
+    onUndo: canUndo ? undo : undefined,
+    onRedo: canRedo ? redo : undefined,
+    onSave: handleSave,
+    onExport: handleExport,
+    enabled: true,
+  });
 
   const handleImport = useCallback(() => {
     const jsonStr = window.prompt('Paste JSON with {nodes, edges}:');
@@ -267,6 +306,16 @@ export default function Toolbar() {
         <div className="w-px h-4 bg-border/50 mx-0.5 hidden sm:block" />
         <Button 
           size="sm" 
+          variant="outline" 
+          onClick={() => setSecretsVaultOpen(true)}
+          className="h-7 sm:h-8 text-[10px] sm:text-xs font-semibold hover:bg-primary/10 hover:border-primary/40 hover:text-primary transition-all shadow-sm"
+          aria-label="Open Secrets Vault"
+        >
+          🔐 Secrets
+        </Button>
+        <div className="w-px h-4 bg-border/50 mx-0.5 hidden sm:block" />
+        <Button 
+          size="sm" 
           variant="destructive" 
           onClick={handleReset}
           className="h-7 sm:h-8 text-[10px] sm:text-xs font-semibold hover:bg-destructive/90 transition-all shadow-md"
@@ -286,6 +335,17 @@ export default function Toolbar() {
           <span>save</span>
         </div>
       )}
+
+      <Dialog open={secretsVaultOpen} onOpenChange={setSecretsVaultOpen}>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col p-0">
+          <DialogHeader className="flex-shrink-0 px-6 pt-6 pb-4">
+            <DialogTitle>Secrets Vault</DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto min-h-0 px-6 pb-6">
+            <SecretsVault />
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

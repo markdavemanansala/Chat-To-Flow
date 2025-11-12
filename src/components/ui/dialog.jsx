@@ -1,10 +1,16 @@
 import * as React from "react"
+import { createPortal } from "react-dom"
 import { cn } from "@/lib/utils"
 
 const DialogContext = React.createContext()
 
 export function Dialog({ open, onOpenChange, children }) {
   const [isOpen, setIsOpen] = React.useState(open ?? false)
+  const [mounted, setMounted] = React.useState(false)
+
+  React.useEffect(() => {
+    setMounted(true)
+  }, [])
 
   React.useEffect(() => {
     if (open !== undefined) setIsOpen(open)
@@ -26,21 +32,25 @@ export function Dialog({ open, onOpenChange, children }) {
     }
   }, [isOpen])
 
-  if (!isOpen) return null
+  if (!isOpen || !mounted) return null
 
-  return (
+  const dialogContent = (
     <DialogContext.Provider value={{ open: isOpen, onOpenChange: handleOpenChange }}>
-      <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="fixed inset-0 z-[100] flex items-center justify-center" style={{ pointerEvents: 'auto' }}>
         <div 
           className="fixed inset-0 bg-black/60 dark:bg-black/80 backdrop-blur-sm"
           onClick={() => handleOpenChange(false)}
+          style={{ pointerEvents: 'auto' }}
         />
-        <div className="relative z-50">
+        <div className="relative z-[101]" style={{ pointerEvents: 'auto' }}>
           {children}
         </div>
       </div>
     </DialogContext.Provider>
   )
+
+  // Render to document.body using portal to ensure it's above everything
+  return createPortal(dialogContent, document.body)
 }
 
 export function DialogContent({ className, children, ...props }) {
@@ -49,7 +59,7 @@ export function DialogContent({ className, children, ...props }) {
   return (
     <div
       className={cn(
-        "relative bg-background rounded-lg border shadow-lg p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto",
+        "relative bg-background rounded-lg border shadow-lg p-6 max-w-lg w-full max-h-[90vh]",
         className
       )}
       onClick={(e) => e.stopPropagation()}
@@ -57,7 +67,8 @@ export function DialogContent({ className, children, ...props }) {
     >
       <button
         onClick={() => onOpenChange(false)}
-        className="absolute right-4 top-4 rounded-sm opacity-70 hover:opacity-100 text-muted-foreground"
+        className="absolute right-4 top-4 z-[102] rounded-sm opacity-70 hover:opacity-100 text-muted-foreground"
+        aria-label="Close"
       >
         ✕
       </button>

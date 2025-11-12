@@ -131,8 +131,22 @@ function formatStep(node: Node<RfNodeData>, index: number): string {
     desc += `(template="${truncate(String(config.replyTemplate), 20)}")`;
   } else if (kind === 'action.facebook.dm' && config.message) {
     desc += `(message="${truncate(String(config.message), 20)}")`;
+  } else if (kind.startsWith('action.telegram.') && config.message) {
+    desc += `(message="${truncate(String(config.message), 20)}")`;
+  } else if (kind.startsWith('action.telegram.') && config.chatId) {
+    desc += `(chatId="${truncate(String(config.chatId), 15)}")`;
   } else if (kind === 'action.sheets.appendRow' && config.range) {
     desc += `(range="${config.range}")`;
+  } else if (kind === 'action.sheets.readRows' && config.range) {
+    desc += `(range="${config.range}")`;
+  } else if (kind === 'action.sheets.updateCell' && config.range) {
+    desc += `(range="${config.range}")`;
+  } else if (kind === 'action.sheets.clearRange' && config.range) {
+    desc += `(range="${config.range}")`;
+  } else if (kind === 'trigger.sheets.newRow' && config.sheetName) {
+    desc += `(sheet="${config.sheetName}")`;
+  } else if (kind === 'trigger.sheets.update' && config.sheetName) {
+    desc += `(sheet="${config.sheetName}")`;
   } else if (kind === 'action.email.send' && config.subjectTpl) {
     desc += `(subject="${truncate(String(config.subjectTpl), 20)}")`;
   } else if (kind === 'action.http.request' && config.url) {
@@ -206,11 +220,28 @@ function getOrderedSteps(
 function extractIntegrations(nodes: Node<RfNodeData>[]): string[] {
   const integrationMap: Record<string, string> = {
     'trigger.facebook.comment': 'Facebook',
+    'trigger.sheets.newRow': 'Google Sheets',
+    'trigger.sheets.update': 'Google Sheets',
     'action.facebook.reply': 'Facebook',
     'action.facebook.dm': 'Facebook',
     'action.telegram.sendMessage': 'Telegram',
+    'action.telegram.sendPhoto': 'Telegram',
+    'action.telegram.sendVideo': 'Telegram',
+    'action.telegram.sendAudio': 'Telegram',
+    'action.telegram.sendDocument': 'Telegram',
+    'action.telegram.sendLocation': 'Telegram',
+    'action.telegram.sendVenue': 'Telegram',
+    'action.telegram.sendContact': 'Telegram',
+    'action.telegram.sendPoll': 'Telegram',
+    'action.telegram.sendSticker': 'Telegram',
+    'action.telegram.editMessage': 'Telegram',
+    'action.telegram.deleteMessage': 'Telegram',
+    'action.telegram.getUpdates': 'Telegram',
     'action.email.send': 'Email',
     'action.sheets.appendRow': 'Google Sheets',
+    'action.sheets.readRows': 'Google Sheets',
+    'action.sheets.updateCell': 'Google Sheets',
+    'action.sheets.clearRange': 'Google Sheets',
     'action.http.request': 'HTTP',
   };
 

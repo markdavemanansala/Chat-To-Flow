@@ -19,7 +19,7 @@ import 'reactflow/dist/style.css'
 import '../../workflow/WorkflowCanvas.css'
 
 import { Button } from '@/components/ui/button'
-import { useNodes, useEdges, useSetFlow, useSetEdges, useResetFlow, useOnPatchApplied, useApplyPatch, useUndo, useRedo, useGraphStore } from '@/store/graphStore'
+import { useNodes, useEdges, useSetFlow, useSetEdges, useResetFlow, useOnPatchApplied, useApplyPatch, useUndo, useRedo, useGraphStore, useHighlightedNodeIds, useHighlightedEdgeIds } from '@/store/graphStore'
 import { useSetSelectedNodeId, useAddToast } from '@/store/uiStore'
 import { validateGraph as validateGraphUtil } from '@/workflow/validate'
 import { createNode } from '@/workflow/utils'
@@ -117,31 +117,16 @@ function CustomNode({ data, selected, id }) {
     }
   }, [data])
 
-  // Check if this node should be highlighted
+  // Check if this node should be highlighted from store
+  const highlightedNodeIds = useHighlightedNodeIds();
   useEffect(() => {
-    const checkHighlight = () => {
-      try {
-        const highlightedNodesStr = sessionStorage.getItem('highlightedNodes');
-        if (highlightedNodesStr) {
-          const highlightedNodes = new Set(JSON.parse(highlightedNodesStr));
-          setHighlighted(highlightedNodes.has(id));
-        } else {
-          setHighlighted(false);
-        }
-      } catch (e) {
-        setHighlighted(false);
-      }
-    };
-    
-    checkHighlight();
-    const interval = setInterval(checkHighlight, 100);
-    return () => clearInterval(interval);
-  }, [id]);
+    setHighlighted(highlightedNodeIds.has(id));
+  }, [id, highlightedNodeIds]);
 
   return (
     <div 
-      className={`relative px-4 py-2 shadow-md rounded-md bg-card border-2 transition-all ${
-        highlighted ? 'border-green-500 shadow-lg ring-2 ring-green-300 animate-pulse' : 
+      className={`relative px-4 py-2 shadow-md rounded-md bg-card border-2 transition-all duration-300 ${
+        highlighted ? 'border-green-500 shadow-lg shadow-green-500/50 ring-2 ring-green-300 ring-opacity-75' : 
         selected ? 'border-primary' : 'border-border'
       }`}
       onMouseEnter={() => setShowTooltip(true)}

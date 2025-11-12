@@ -3,7 +3,7 @@
  */
 
 /**
- * @typedef {"trigger.facebook.comment"|"trigger.webhook.inbound"|"trigger.scheduler.cron"|"logic.filter"|"ai.guard"|"ai.generate"|"action.facebook.reply"|"action.facebook.dm"|"action.telegram.sendMessage"|"action.email.send"|"action.sheets.appendRow"|"action.http.request"} NodeKind
+ * @typedef {"trigger.facebook.comment"|"trigger.webhook.inbound"|"trigger.scheduler.cron"|"trigger.sheets.newRow"|"trigger.sheets.update"|"logic.filter"|"ai.guard"|"ai.generate"|"action.facebook.reply"|"action.facebook.dm"|"action.telegram.sendMessage"|"action.telegram.sendPhoto"|"action.telegram.sendDocument"|"action.telegram.sendLocation"|"action.telegram.sendPoll"|"action.telegram.editMessage"|"action.telegram.deleteMessage"|"action.telegram.sendVideo"|"action.telegram.sendAudio"|"action.telegram.sendSticker"|"action.telegram.sendVenue"|"action.telegram.sendContact"|"action.telegram.getUpdates"|"action.email.send"|"action.sheets.appendRow"|"action.sheets.readRows"|"action.sheets.updateCell"|"action.sheets.clearRange"|"action.http.request"} NodeKind
  * Node kind types - must match exactly
  */
 

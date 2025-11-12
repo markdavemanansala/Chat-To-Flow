@@ -15,6 +15,10 @@ import { useAddToast } from '@/store/uiStore';
 import { planFromIntent } from '@/workflow/planner';
 import { getConversationalResponse } from '@/lib/api';
 import { isOpenAIAvailable } from '@/lib/config';
+import { useConnectModal } from '@/store/connectionStore';
+import { getNodesRequiringCredentials } from '@/utils/connectionCheck';
+import { getCurrentLocale, getT } from '@/i18n';
+import { ConnectModal } from '@/components/connect/ConnectModal';
 import type { Node } from 'reactflow';
 import type { RfNodeData } from '@/types/graph';
 
@@ -37,6 +41,9 @@ export default function ChatPanel() {
   const setAIState = useSetAIState();
   const applyPatch = useApplyPatch();
   const addToast = useAddToast();
+  const { openModal: openConnectModal } = useConnectModal();
+  const locale = getCurrentLocale();
+  const t = getT(locale);
 
   // Check OpenAI connection
   useEffect(() => {
@@ -122,6 +129,37 @@ export default function ChatPanel() {
           console.log('🔧 Patch result:', result);
 
           if (result.ok) {
+            // Check for nodes requiring credentials
+            const nodesRequiringCreds = getNodesRequiringCredentials(patch);
+            if (nodesRequiringCreds.length > 0) {
+              // Show connection prompt for the first provider
+              const firstProvider = nodesRequiringCreds[0];
+              const providerName = firstProvider.providerName;
+              const nodeKind = firstProvider.nodeKind;
+              
+              // Add inline message to chat
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: Date.now() + 2,
+                  role: 'assistant',
+                  text: t('node.requiresCredentials', 'This node requires {provider} credentials')
+                    .replace('{provider}', providerName),
+                },
+              ]);
+              
+              // Show toast with action
+              addToast({
+                type: 'warn',
+                text: t('node.connectPrompt', 'Connect {provider} to continue').replace('{provider}', providerName),
+              });
+              
+              // Open connect modal
+              setTimeout(() => {
+                openConnectModal(firstProvider.providerId, nodeKind);
+              }, 500);
+            }
+
             // Highlight changed nodes (handled by store events)
             const nodeCountChange = result.nodes.length - nodes.length;
             if (nodeCountChange > 0) {
@@ -163,7 +201,9 @@ export default function ChatPanel() {
   }, [input]);
 
   return (
-    <div className="h-full w-full flex flex-col bg-background overflow-hidden">
+    <>
+      <ConnectModal />
+      <div className="h-full w-full flex flex-col bg-background overflow-hidden">
       <CardHeader className="border-b pb-2 sm:pb-3 shrink-0 px-3 sm:px-6">
         <div className="flex items-center justify-between gap-2">
           <div className="flex-1 min-w-0">
@@ -277,6 +317,7 @@ export default function ChatPanel() {
         </div>
       </div>
     </div>
+    </>
   );
 }
 

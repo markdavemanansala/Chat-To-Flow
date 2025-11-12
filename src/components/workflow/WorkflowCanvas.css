@@ -29,5 +29,15 @@
   height: 100%;
   width: 100%;
   min-height: 0;
+  z-index: 0; /* Ensure canvas is below modals */
+}
+
+/* Ensure React Flow controls don't overlap modals */
+.react-flow__controls {
+  z-index: 10 !important;
+}
+
+.react-flow__minimap {
+  z-index: 10 !important;
 }
 

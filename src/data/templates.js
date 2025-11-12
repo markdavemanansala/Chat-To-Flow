@@ -97,5 +97,18 @@ export const templates = [
       { key: "expense_sources", label: "Expense Sources", placeholder: "Bank, Credit Cards, Receipts" },
       { key: "categories", label: "Categories", placeholder: "Travel, Meals, Supplies" }
     ]
+  },
+  {
+    id: "meeting-reminder-automation",
+    name: "AI Meeting & Appointment Reminder",
+    description: "Automatically check meeting schedules and send reminders via email, Telegram, or Zoom notifications when meetings are approaching.",
+    industry: "Generic",
+    promptHint: "Creating an automated meeting reminder system that checks schedules and sends notifications via multiple channels.",
+    sampleIntent: "Every 15 minutes, check meeting schedule from Google Sheets, filter meetings starting in next 15 minutes, then send email reminder and Telegram notification with Zoom link",
+    variables: [
+      { key: "check_interval", label: "Check Interval", placeholder: "15 minutes" },
+      { key: "reminder_time", label: "Reminder Time Before Meeting", placeholder: "15 minutes" },
+      { key: "notification_methods", label: "Notification Methods", placeholder: "Email, Telegram, Zoom" }
+    ]
   }
 ]

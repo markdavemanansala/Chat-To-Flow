@@ -2,10 +2,10 @@
  * Application configuration
  */
 
-export const IS_MOCK = true
+export const IS_MOCK = false // Backend is now available
 
 // API Configuration
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://api.example.com'
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api'
 export const PARSE_APP_ID = import.meta.env.VITE_PARSE_APP_ID || ''
 export const PARSE_JS_KEY = import.meta.env.VITE_PARSE_JS_KEY || ''
 export const PARSE_SERVER_URL = import.meta.env.VITE_PARSE_SERVER_URL || 'https://parseapi.back4app.com'

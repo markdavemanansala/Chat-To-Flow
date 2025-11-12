@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { useState, useCallback, useEffect } from 'react'
 import { useNodes, useEdges, useSetFlow, useApplyPatch } from '@/store/graphStore'
-import { useSetSelectedNodeId } from '@/store/uiStore'
+import { useSetSelectedNodeId, useSetMode } from '@/store/uiStore'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
@@ -87,6 +87,32 @@ export default function SimpleCanvas() {
       flowOrder.push(node)
     }
   })
+
+  // Check if graph has branches (multiple paths)
+  const hasBranches = (() => {
+    // Count outgoing edges per node
+    const outgoingCount = new Map<string, number>()
+    edges.forEach(edge => {
+      outgoingCount.set(edge.source, (outgoingCount.get(edge.source) || 0) + 1)
+    })
+    
+    // Check if any node has multiple outgoing edges (branching)
+    for (const count of outgoingCount.values()) {
+      if (count > 1) return true
+    }
+    
+    // Check if any node has multiple incoming edges (converging)
+    const incomingCount = new Map<string, number>()
+    edges.forEach(edge => {
+      incomingCount.set(edge.target, (incomingCount.get(edge.target) || 0) + 1)
+    })
+    
+    for (const count of incomingCount.values()) {
+      if (count > 1) return true
+    }
+    
+    return false
+  })()
 
   const handleDragStart = useCallback((e: React.DragEvent, nodeId: string) => {
     setDraggedNode(nodeId)
@@ -362,11 +388,18 @@ export default function SimpleCanvas() {
       }}
     >
       <div className="mb-4 sm:mb-5">
-        <h3 className="text-lg sm:text-xl font-bold mb-1.5 bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent">
-          Your Workflow
-        </h3>
+        <div className="flex items-center justify-between mb-1.5">
+          <h3 className="text-lg sm:text-xl font-bold bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent">
+            Your Workflow
+          </h3>
+          {hasBranches && (
+            <Badge variant="outline" className="text-xs px-2 py-1 bg-yellow-500/10 border-yellow-500/30 text-yellow-700 dark:text-yellow-400">
+              ⚠️ Advanced structure hidden
+            </Badge>
+          )}
+        </div>
         <p className="text-xs sm:text-sm text-muted-foreground">
-          Drag steps to reorder • Click to edit
+          {hasBranches ? 'Switch to Flow View to see all connections' : 'Drag steps to reorder • Click to edit'}
         </p>
       </div>
 

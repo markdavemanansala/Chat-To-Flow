@@ -9,6 +9,7 @@ import { useSetFlow, useApplyPatch } from "@/store/graphStore"
 import { useSetSummary } from "@/store/aiStore"
 import { GuidedTemplateChecklist } from "@/components/templates/GuidedTemplateChecklist"
 import { planFromIntent } from "@/workflow/planner"
+import { createNodesFromTemplateIntent } from "@/workflow/templateNodes"
 
 const industries = ["All", "F&B", "Retail", "Real Estate", "Education", "Healthcare", "VA/Freelance", "Generic"]
 
@@ -59,22 +60,30 @@ export function Templates() {
       console.log('🚀 Generating workflow from template:', template.name)
       console.log('📝 Intent:', intent)
       
-      // Use the patch-based system (same as Chat)
-      // Pass the intent as both intent and originalIntent for better context
-      const patch = await planFromIntent(intent, 'Empty workflow (no nodes)', [], intent)
+      // Use direct template-to-nodes mapping for reliable node creation
+      const { nodes, edges } = createNodesFromTemplateIntent(intent)
       
-      if (!patch) {
-        throw new Error('Failed to generate workflow patch')
+      if (nodes && nodes.length > 0) {
+        // Use directly created nodes
+        console.log('✅ Template workflow created directly:', nodes.length, 'nodes')
+        setFlow(nodes, edges)
+      } else {
+        // Fallback to AI planner if direct mapping fails
+        console.log('⚠️ Direct mapping failed, falling back to AI planner')
+        const patch = await planFromIntent(intent, 'Empty workflow (no nodes)', [], intent)
+        
+        if (!patch) {
+          throw new Error('Failed to generate workflow patch')
+        }
+        
+        const result = applyPatch(patch)
+        
+        if (!result.ok) {
+          throw new Error(`Patch application failed: ${result.issues?.join(', ')}`)
+        }
+        
+        console.log('✅ Template workflow created successfully:', result.nodes?.length || 0, 'nodes')
       }
-      
-      // Apply the patch
-      const result = applyPatch(patch)
-      
-      if (!result.ok) {
-        throw new Error(`Patch application failed: ${result.issues?.join(', ')}`)
-      }
-      
-      console.log('✅ Template workflow created successfully:', result.nodes?.length || 0, 'nodes')
       
       // Update AI summary with template info
       const summary = `Template: ${template.name}\n${template.description}\nIntent: ${intent}`
