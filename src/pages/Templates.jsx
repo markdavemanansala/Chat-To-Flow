@@ -5,18 +5,18 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { templates } from "@/data/templates"
-import { useSetTemplate, useSetWorkflow, useSetFlow } from "@/store/app"
+import { useSetFlow, useApplyPatch } from "@/store/graphStore"
+import { useSetSummary } from "@/store/aiStore"
 import { GuidedTemplateChecklist } from "@/components/templates/GuidedTemplateChecklist"
-import { generateWorkflowFromIntent } from "@/lib/api"
-import { convertWorkflowToFlow } from "@/components/WorkflowBuilder"
+import { planFromIntent } from "@/workflow/planner"
 
 const industries = ["All", "F&B", "Retail", "Real Estate", "Education", "Healthcare", "VA/Freelance", "Generic"]
 
 export function Templates() {
   const navigate = useNavigate()
-  const setTemplate = useSetTemplate()
-  const setWorkflow = useSetWorkflow()
   const setFlow = useSetFlow()
+  const applyPatch = useApplyPatch()
+  const setSummary = useSetSummary()
 
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedIndustry, setSelectedIndustry] = useState("All")
@@ -36,9 +36,6 @@ export function Templates() {
   const [isGenerating, setIsGenerating] = useState(false)
 
   const handleUseTemplate = async (template) => {
-    // Set selected template in Zustand
-    setTemplate(template)
-    
     // Show guided checklist for templates with variables
     if (template.variables && template.variables.length > 0) {
       setSelectedTemplateForChecklist(template)
@@ -50,54 +47,45 @@ export function Templates() {
   const createAndNavigate = async (template, checklistData = {}) => {
     setIsGenerating(true)
     try {
-      // Generate workflow from template's sample intent
-      const workflowSummary = await generateWorkflowFromIntent(template.sampleIntent)
-      
-      // Enhance with template metadata
-      const enhancedWorkflow = {
-        ...workflowSummary,
-        name: template.name,
-        integrations: [...new Set([...workflowSummary.integrations, template.industry])],
-        notes: `Generated from ${template.name} template. ${template.description} Trigger: ${template.sampleIntent}`,
-        source: "template",
-        ...checklistData
+      // Build intent from template, incorporating checklist data if provided
+      let intent = template.sampleIntent
+      if (Object.keys(checklistData).length > 0) {
+        // Replace variables in intent with checklist data
+        Object.entries(checklistData).forEach(([key, value]) => {
+          intent = intent.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), value)
+        })
       }
-
-      setWorkflow(enhancedWorkflow)
       
-      // Convert workflow to nodes/edges and set in store (same as chat)
-      const { nodes, edges } = convertWorkflowToFlow(enhancedWorkflow)
-      if (nodes.length > 0) {
-        setFlow(nodes, edges)
-        console.log('✅ Template workflow converted to nodes/edges:', nodes.length, 'nodes')
+      console.log('🚀 Generating workflow from template:', template.name)
+      console.log('📝 Intent:', intent)
+      
+      // Use the patch-based system (same as Chat)
+      // Pass the intent as both intent and originalIntent for better context
+      const patch = await planFromIntent(intent, 'Empty workflow (no nodes)', [], intent)
+      
+      if (!patch) {
+        throw new Error('Failed to generate workflow patch')
       }
+      
+      // Apply the patch
+      const result = applyPatch(patch)
+      
+      if (!result.ok) {
+        throw new Error(`Patch application failed: ${result.issues?.join(', ')}`)
+      }
+      
+      console.log('✅ Template workflow created successfully:', result.nodes?.length || 0, 'nodes')
+      
+      // Update AI summary with template info
+      const summary = `Template: ${template.name}\n${template.description}\nIntent: ${intent}`
+      setSummary(summary)
 
-      // Navigate to preview
-      navigate("/preview")
+      // Navigate to builder
+      navigate("/builder")
       setSelectedTemplateForChecklist(null)
     } catch (error) {
       console.error("Error generating workflow from template:", error)
-      // Fallback to basic workflow structure
-      const workflowSummary = {
-        name: template.name,
-        trigger: `Manual trigger or scheduled: ${template.sampleIntent}`,
-        steps: template.description.split('. ').filter(Boolean).slice(0, 4),
-        integrations: [template.industry],
-        notes: `Generated from ${template.name} template. ${template.description}`,
-        source: "template",
-        ...checklistData
-      }
-      setWorkflow(workflowSummary)
-      
-      // Convert workflow to nodes/edges and set in store (same as chat)
-      const { nodes, edges } = convertWorkflowToFlow(workflowSummary)
-      if (nodes.length > 0) {
-        setFlow(nodes, edges)
-        console.log('✅ Fallback template workflow converted to nodes/edges:', nodes.length, 'nodes')
-      }
-      
-      navigate("/preview")
-      setSelectedTemplateForChecklist(null)
+      alert(`Failed to create workflow: ${error.message}. Please try again or use the chat builder.`)
     } finally {
       setIsGenerating(false)
     }

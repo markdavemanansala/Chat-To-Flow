@@ -52,6 +52,38 @@ export function getCredentialTypeName(nodeKind) {
 }
 
 /**
+ * Get the URL to get API keys for a node kind
+ * @param {string} nodeKind - The node kind
+ * @returns {string} The URL to get API keys
+ */
+export function getApiKeyUrl(nodeKind) {
+  if (!nodeKind) return null
+  
+  if (nodeKind.includes('facebook')) return 'https://developers.facebook.com/apps/'
+  if (nodeKind.includes('telegram')) return 'https://core.telegram.org/bots/tutorial#obtain-your-bot-token'
+  if (nodeKind.includes('email')) return 'https://sendgrid.com/docs/ui/account-and-settings/api-keys/'
+  if (nodeKind.includes('sheets')) return 'https://console.cloud.google.com/apis/credentials'
+  
+  return null
+}
+
+/**
+ * Get a user-friendly service name
+ * @param {string} nodeKind - The node kind
+ * @returns {string} The service name
+ */
+export function getServiceName(nodeKind) {
+  if (!nodeKind) return 'API'
+  
+  if (nodeKind.includes('facebook')) return 'Facebook'
+  if (nodeKind.includes('telegram')) return 'Telegram'
+  if (nodeKind.includes('email')) return 'Email Service'
+  if (nodeKind.includes('sheets')) return 'Google Sheets'
+  
+  return 'API'
+}
+
+/**
  * Check credentials status for a node
  * @param {string} nodeKind - The node kind
  * @returns {{ requires: boolean, has: boolean, typeName: string }}

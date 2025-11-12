@@ -13,18 +13,21 @@ export function createNode(kind, partial = {}) {
   // Get default label based on kind
   const defaultLabel = getDefaultLabel(kind)
   
+  // Extract data from partial to avoid overwriting
+  const { data: partialData, ...restPartial } = partial
+  
   return {
     id,
-    type: 'default',
+    type: partial.type || 'default',
     position: partial.position || { x: 100, y: 100 },
     data: {
-      kind,
-      label: partial.data?.label || partial.label || defaultLabel,
-      config: partial.data?.config || partial.config || {},
-      role: partial.data?.role || getNodeRole(kind),
-      ...partial.data,
+      kind, // Always set kind first
+      label: partialData?.label || partial.label || defaultLabel,
+      config: partialData?.config || partial.config || {},
+      role: partialData?.role || getNodeRole(kind),
+      ...partialData, // Spread partial data after setting defaults
     },
-    ...partial,
+    ...restPartial, // Spread rest of partial (excluding data)
   }
 }
 

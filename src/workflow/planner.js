@@ -4,6 +4,7 @@
 
 import { createNode, connect, getDefaultLabel } from './utils.js';
 import { getNodeRole } from './graphTypes.js';
+import { generateNodeLabel } from './labeler.js';
 
 /**
  * Plan a graph patch from user intent
@@ -12,7 +13,7 @@ import { getNodeRole } from './graphTypes.js';
  * @param {import('reactflow').Node[]} [nodes] - Actual nodes for ID matching (optional)
  * @returns {Promise<import('./graphTypes').GraphPatch>}
  */
-export async function planFromIntent(intent, contextSummary, nodes = []) {
+export async function planFromIntent(intent, contextSummary, nodes = [], originalIntent = '') {
   const { OPENAI_API_KEY } = await import('../lib/config.js');
   
   // If no API key, use rule-based fallback
@@ -27,7 +28,29 @@ export async function planFromIntent(intent, contextSummary, nodes = []) {
       dangerouslyAllowBrowser: true
     });
 
-    const systemPrompt = `You are a workflow planner. You receive the user's request and a short summary of the current workflow. Output a minimal JSON patch to modify the graph so it matches the request. Prefer UPDATE_NODE and REWIRE over delete+add. Keep exactly one trigger. Maintain a sensible linear flow unless branching is requested. If ambiguous, ask a brief clarifying question. Output only valid JSON for the GraphPatch shape—no prose.`;
+    const systemPrompt = `You are a workflow planner. You receive the user's request and a short summary of the current workflow. Output a minimal JSON patch to modify the graph so it matches the request.
+
+AVAILABLE NODE KINDS:
+- Triggers: trigger.facebook.comment, trigger.webhook.inbound, trigger.scheduler.cron
+- Actions: 
+  * action.facebook.reply (for replying to Facebook comments)
+  * action.facebook.dm (for sending Facebook direct messages)
+  * action.telegram.sendMessage (for Telegram messages)
+  * action.email.send (for sending emails)
+  * action.sheets.appendRow (for saving to Google Sheets)
+  * action.http.request (for generic API calls - use this for posting to Facebook/Instagram/Twitter/LinkedIn, fetching data, etc.)
+- Logic: logic.filter, ai.guard, ai.generate
+
+IMPORTANT RULES:
+- When the user asks to REMOVE or DELETE a node, you MUST use REMOVE_NODE operation with the exact node ID from the available nodes list
+- Use the exact node ID provided in the "Available nodes" section - do NOT make up IDs
+- For REMOVE_NODE operations, the format is: {"op": "REMOVE_NODE", "id": "exact_node_id_here"}
+- If removing multiple nodes, use BULK operation with multiple REMOVE_NODE ops
+- Prefer UPDATE_NODE and REWIRE over delete+add for modifications
+- Keep exactly one trigger (never remove the only trigger)
+- Maintain a sensible linear flow unless branching is requested
+- For HTTP requests, include helpful context in the config like {"url": "...", "method": "POST", "platform": "Facebook"} or {"url": "...", "method": "POST", "service": "Instagram"} to help with labeling
+- Output only valid JSON for the GraphPatch shape—no prose or explanations`;
 
     const functionSchema = {
       name: "update_workflow",
@@ -72,8 +95,13 @@ export async function planFromIntent(intent, contextSummary, nodes = []) {
     // Enhance context with node ID mapping for better matching
     let enhancedContext = contextSummary;
     if (nodes.length > 0) {
-      const nodeIdMap = nodes.map(n => `  - "${n.data?.label || n.id}": id="${n.id}"`).join('\n');
-      enhancedContext = `${contextSummary}\n\nNode ID mapping:\n${nodeIdMap}`;
+      const nodeIdMap = nodes.map((n, idx) => {
+        const label = n.data?.label || 'Untitled';
+        const kind = n.data?.kind || 'unknown';
+        const role = n.data?.role || 'UNKNOWN';
+        return `  ${idx + 1}. "${label}" (${kind}, ${role}): id="${n.id}"`;
+      }).join('\n');
+      enhancedContext = `${contextSummary}\n\nAvailable nodes (use the exact id for REMOVE_NODE operations):\n${nodeIdMap}`;
     }
 
     const completion = await openai.chat.completions.create({
@@ -96,32 +124,97 @@ export async function planFromIntent(intent, contextSummary, nodes = []) {
     const args = JSON.parse(functionCall.arguments);
     
     console.log('📦 AI returned patch args:', JSON.stringify(args, null, 2));
+    console.log('📦 AI function call message:', completion.choices[0].message);
     
     // Validate args structure
     if (!args.ops || !Array.isArray(args.ops) || args.ops.length === 0) {
       console.warn('⚠️ AI returned invalid ops array, falling back to rule-based planner');
+      console.warn('⚠️ Args received:', args);
       return planFromIntentFallback(intent, contextSummary, nodes || []);
     }
     
+    // Log each operation for debugging
+    args.ops.forEach((op, idx) => {
+      console.log(`📦 Operation ${idx + 1}:`, JSON.stringify(op, null, 2));
+    });
+    
     // Normalize all operations first
+    // Build a kind->id mapping as we normalize nodes
+    const kindToIdMap = new Map();
     const normalizedOps = args.ops
       .filter(op => op && op.op) // Filter out invalid operations
       .map(op => {
         // Check if AI returned node properties at top level instead of nested
         if (op.op === 'ADD_NODE' && !op.node && (op.id || op.kind || op.label || op.data)) {
           console.warn('⚠️ AI returned ADD_NODE with node properties at top level, restructuring...');
+          // Extract kind from id if it looks like a kind (e.g., "trigger.scheduler.cron" or "action.http.request")
+          let nodeKind = op.kind;
+          if (!nodeKind && op.id && (op.id.includes('action.') || op.id.includes('trigger.') || op.id.includes('logic.') || op.id.includes('ai.'))) {
+            nodeKind = op.id; // Use the id as the kind if it looks like a kind
+            console.log(`📝 Extracted kind "${nodeKind}" from id "${op.id}"`);
+          }
+          if (!nodeKind) {
+            nodeKind = 'action.http.request'; // Fallback default
+          }
+          // Generate unique ID if not provided or if it looks like a kind
+          let nodeId = op.id;
+          if (!nodeId || nodeId === nodeKind || nodeId.includes('action.') || nodeId.includes('trigger.') || nodeId.includes('logic.') || nodeId.includes('ai.')) {
+            nodeId = undefined; // Let createNode generate a unique ID
+            console.warn('⚠️ Generated new unique ID for node. Kind:', nodeKind);
+          }
           op.node = {
-            id: op.id,
+            id: nodeId,
             type: op.type || 'default',
             position: op.position || { x: 100, y: 100 },
             data: op.data || {
-              kind: op.kind || 'action.http.request',
+              kind: nodeKind,
               label: op.label || 'Untitled Node',
               config: op.config || {}
             }
           };
         }
-        return normalizePatch(op);
+        const normalized = normalizePatch(op);
+        // For HTTP requests, try to add platform context from intent if not in config
+        if (normalized && normalized.op === 'ADD_NODE' && normalized.node && normalized.node.data?.kind === 'action.http.request') {
+          const lowerIntent = (originalIntent || intent).toLowerCase();
+          if (!normalized.node.data.config.platform && !normalized.node.data.config.service) {
+            if (lowerIntent.includes('facebook') || lowerIntent.includes('fb')) {
+              normalized.node.data.config.platform = 'Facebook';
+            } else if (lowerIntent.includes('instagram')) {
+              normalized.node.data.config.platform = 'Instagram';
+            } else if (lowerIntent.includes('twitter')) {
+              normalized.node.data.config.platform = 'Twitter';
+            } else if (lowerIntent.includes('linkedin')) {
+              normalized.node.data.config.platform = 'LinkedIn';
+            }
+          }
+          // Regenerate label with updated config
+          if (normalized.node.data.config.platform || normalized.node.data.config.service) {
+            normalized.node.data.label = generateNodeLabel(normalized.node.data.kind, normalized.node.data.config);
+          }
+        }
+        // Track kind->id mapping for edge resolution
+        if (normalized && normalized.op === 'ADD_NODE' && normalized.node && normalized.node.data?.kind) {
+          const kind = normalized.node.data.kind;
+          const id = normalized.node.id;
+          if (!kindToIdMap.has(kind)) {
+            kindToIdMap.set(kind, []);
+          }
+          kindToIdMap.get(kind).push({ id, node: normalized.node });
+          console.log(`📝 Mapped kind "${kind}" -> id "${id}"`);
+        }
+        // Also track edges that need fixing
+        if (normalized && normalized.op === 'ADD_EDGE') {
+          const sourceId = normalized.from || (normalized.edge && normalized.edge.source);
+          const targetId = normalized.to || (normalized.edge && normalized.edge.target);
+          if (sourceId && (sourceId.includes('action.') || sourceId.includes('trigger.'))) {
+            console.log(`⚠️ Edge with kind-based source detected: "${sourceId}"`);
+          }
+          if (targetId && (targetId.includes('action.') || targetId.includes('trigger.'))) {
+            console.log(`⚠️ Edge with kind-based target detected: "${targetId}"`);
+          }
+        }
+        return normalized;
       })
       .filter(op => {
         // Filter out empty BULK patches and invalid patches
@@ -140,53 +233,285 @@ export async function planFromIntent(intent, contextSummary, nodes = []) {
       return planFromIntentFallback(intent, contextSummary, nodes || []);
     }
     
-    // Convert to GraphPatch format
-    if (normalizedOps.length === 1) {
-      return normalizedOps[0];
-    }
+    // Post-process: fix edge source/target IDs that use kinds instead of actual IDs
+    // Do this AFTER all nodes are normalized and added to the mapping
+    console.log('🔍 Kind to ID mapping (before edge fixing):', Array.from(kindToIdMap.entries()).map(([k, v]) => `${k} -> [${v.map(n => n.id).join(', ')}]`));
+    console.log('🔍 Normalized operations count:', normalizedOps.length);
     
-    // Post-process: match node IDs from labels if needed
-    const processedOps = normalizedOps.map(op => {
+    // Helper function to fix edges in an operation
+    const fixEdgesInOp = (op) => {
+      if (!op || !op.op) return op;
+      
+      // Fix ADD_EDGE operations
+      if (op.op === 'ADD_EDGE') {
+        let sourceId = op.from || (op.edge && op.edge.source);
+        let targetId = op.to || (op.edge && op.edge.target);
+        let sourceFixed = false;
+        let targetFixed = false;
+        
+        console.log(`🔍 Processing edge: source="${sourceId}", target="${targetId}"`);
+        
+        // Check if source/target look like kinds and resolve them
+        if (sourceId && (sourceId.includes('action.') || sourceId.includes('trigger.') || kindToIdMap.has(sourceId))) {
+          const nodesOfKind = kindToIdMap.get(sourceId);
+          if (nodesOfKind && nodesOfKind.length > 0) {
+            const oldSourceId = sourceId;
+            sourceId = nodesOfKind[0].id;
+            sourceFixed = true;
+            console.log(`🔗 Fixed edge source: "${oldSourceId}" -> "${sourceId}"`);
+          } else {
+            console.warn(`⚠️ Could not find nodes for kind "${sourceId}" in mapping. Available kinds:`, Array.from(kindToIdMap.keys()));
+          }
+        }
+        
+        if (targetId && (targetId.includes('action.') || targetId.includes('trigger.') || kindToIdMap.has(targetId))) {
+          const nodesOfKind = kindToIdMap.get(targetId);
+          if (nodesOfKind && nodesOfKind.length > 0) {
+            const oldTargetId = targetId;
+            targetId = nodesOfKind[0].id;
+            targetFixed = true;
+            console.log(`🔗 Fixed edge target: "${oldTargetId}" -> "${targetId}"`);
+          } else {
+            console.warn(`⚠️ Could not find nodes for kind "${targetId}" in mapping. Available kinds:`, Array.from(kindToIdMap.keys()));
+          }
+        }
+        
+        if (sourceFixed || targetFixed) {
+          console.log(`✅ Updated edge: source="${sourceId}", target="${targetId}"`);
+          // Create a new object to ensure mutation is preserved
+          if (op.edge) {
+            return {
+              ...op,
+              edge: {
+                ...op.edge,
+                source: sourceId,
+                target: targetId
+              }
+            };
+          } else {
+            return {
+              ...op,
+              from: sourceId,
+              to: targetId
+            };
+          }
+        }
+        return op;
+      }
+      
+      // Fix REWIRE operations
+      if (op.op === 'REWIRE') {
+        let fromId = op.from;
+        let toId = op.to;
+        let fromFixed = false;
+        let toFixed = false;
+        
+        if (fromId && (fromId.includes('action.') || fromId.includes('trigger.') || kindToIdMap.has(fromId))) {
+          const nodesOfKind = kindToIdMap.get(fromId);
+          if (nodesOfKind && nodesOfKind.length > 0) {
+            fromId = nodesOfKind[0].id;
+            fromFixed = true;
+            console.log(`🔗 Fixed REWIRE from: ${op.from} -> ${fromId}`);
+          }
+        }
+        
+        if (toId && (toId.includes('action.') || toId.includes('trigger.') || kindToIdMap.has(toId))) {
+          const nodesOfKind = kindToIdMap.get(toId);
+          if (nodesOfKind && nodesOfKind.length > 0) {
+            toId = nodesOfKind[0].id;
+            toFixed = true;
+            console.log(`🔗 Fixed REWIRE to: ${op.to} -> ${toId}`);
+          }
+        }
+        
+        if (fromFixed || toFixed) {
+          // Create a new object to ensure mutation is preserved
+          return {
+            ...op,
+            from: fromId,
+            to: toId
+          };
+        }
+      }
+      
+      // Recursively fix edges in BULK operations
+      if (op.op === 'BULK' && op.ops && Array.isArray(op.ops)) {
+        const fixedOps = op.ops.map(nestedOp => fixEdgesInOp(nestedOp));
+        // Create a new object to ensure mutation is preserved
+        return { ...op, ops: fixedOps };
+      }
+      
+      return op;
+    };
+    
+    // First, fix all edges in all operations (including nested BULK ops)
+    let processedOps = normalizedOps.map((op, idx) => {
+      console.log(`🔧 Processing operation ${idx + 1}/${normalizedOps.length}: ${op.op}`);
+      const fixed = fixEdgesInOp(op);
+      if (fixed !== op) {
+        console.log(`✅ Operation ${idx + 1} was modified by edge fixing`);
+      }
+      return fixed;
+    });
+    
+    // Then process REMOVE_NODE/UPDATE_NODE matching (this might create new objects, so we need to preserve edge fixes)
+    processedOps = processedOps.map(op => {
       if ((op.op === 'REMOVE_NODE' || op.op === 'UPDATE_NODE') && op.id) {
-        // Try to match by ID first
+        // Try to match by ID first (exact match)
         let matchedNode = nodes.find(n => n.id === op.id);
         
         // If not found, try to match by label (AI might return a label instead of ID)
         if (!matchedNode && nodes.length > 0) {
-          const searchId = op.id.toLowerCase();
+          const searchId = op.id.toLowerCase().trim();
+          console.log(`🔍 Trying to match "${op.id}" to a node...`);
+          
           matchedNode = nodes.find(n => {
-            const nodeLabel = (n.data?.label || '').toLowerCase();
+            const nodeLabel = (n.data?.label || '').toLowerCase().trim();
             const nodeId = n.id.toLowerCase();
+            const nodeKind = (n.data?.kind || '').toLowerCase();
             
-            // Direct match
-            if (nodeId === searchId || nodeLabel === searchId) return true;
+            // Strategy 1: Exact label match
+            if (nodeLabel === searchId) {
+              console.log(`  ✓ Exact label match: "${nodeLabel}"`);
+              return true;
+            }
             
-            // Partial match
-            if (nodeLabel.includes(searchId) || searchId.includes(nodeLabel)) return true;
+            // Strategy 2: Exact ID match (case-insensitive)
+            if (nodeId === searchId) {
+              console.log(`  ✓ Exact ID match: "${nodeId}"`);
+              return true;
+            }
             
-            // Word match
-            const searchWords = searchId.split(/\s+/);
+            // Strategy 3: Label contains search term or vice versa
+            if (nodeLabel.includes(searchId) || searchId.includes(nodeLabel)) {
+              console.log(`  ✓ Partial label match: "${nodeLabel}" contains "${searchId}"`);
+              return true;
+            }
+            
+            // Strategy 4: Word match - check if any words in search match words in label
+            const searchWords = searchId.split(/\s+/).filter(w => w.length > 2);
             const labelWords = nodeLabel.split(/\s+/);
-            if (searchWords.some(w => labelWords.includes(w))) return true;
+            if (searchWords.length > 0 && searchWords.some(w => labelWords.includes(w))) {
+              console.log(`  ✓ Word match: "${searchWords.join(', ')}" found in "${nodeLabel}"`);
+              return true;
+            }
+            
+            // Strategy 5: Match by kind keywords (e.g., "facebook reply" matches "action.facebook.reply")
+            const kindKeywords = ['facebook', 'sheets', 'email', 'telegram', 'reply', 'dm', 'http', 'webhook', 'scheduler'];
+            const matchingKeyword = kindKeywords.find(k => searchId.includes(k) && nodeKind.includes(k));
+            if (matchingKeyword) {
+              console.log(`  ✓ Kind keyword match: "${matchingKeyword}" found in both search and kind`);
+              return true;
+            }
+            
+            // Strategy 6: Match step numbers (e.g., "step 1", "first step")
+            const stepMatch = searchId.match(/(?:step|first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s*(\d+)?/);
+            if (stepMatch) {
+              const stepNum = stepMatch[1] ? parseInt(stepMatch[1]) : 1;
+              // This would require knowing the order, but we can't do that here easily
+              // Skip this strategy for now
+            }
             
             return false;
           });
         }
         
         if (matchedNode) {
-          console.log(`🎯 Matched AI's "${op.id}" to node:`, matchedNode.id, matchedNode.data?.label);
+          console.log(`✅ Matched AI's "${op.id}" to node:`, matchedNode.id, `(${matchedNode.data?.label})`);
           return { ...op, id: matchedNode.id };
         } else {
-          console.warn(`⚠️ Could not match AI's "${op.id}" to any node. Available:`, nodes.map(n => ({ id: n.id, label: n.data?.label })));
+          console.error(`❌ Could not match AI's "${op.id}" to any node.`);
+          console.error(`Available nodes:`, nodes.map(n => ({ 
+            id: n.id, 
+            label: n.data?.label,
+            kind: n.data?.kind 
+          })));
+          // Don't return the patch if we can't match it - it will fail anyway
+          return null;
         }
       }
       return op;
+    }).filter(op => op !== null); // Filter out nulls from failed matches
+    
+    // Check if we have any valid operations after processing
+    if (processedOps.length === 0) {
+      console.error('❌ No valid operations after processing. All operations were filtered out.');
+      console.error('❌ Original operations:', normalizedOps);
+      // Fall back to rule-based planner
+      return planFromIntentFallback(intent, contextSummary, nodes || []);
+    }
+    
+    // Log final operations to verify edges are fixed
+    console.log('🔍 Final processed operations:');
+    processedOps.forEach((op, idx) => {
+      if (op.op === 'ADD_EDGE') {
+        const sourceId = op.from || (op.edge && op.edge.source);
+        const targetId = op.to || (op.edge && op.edge.target);
+        console.log(`  Edge ${idx + 1}: source="${sourceId}", target="${targetId}"`);
+        // Double-check: if still has kind-based ID, try to fix it one more time
+        if (sourceId && (sourceId.includes('action.') || sourceId.includes('trigger.'))) {
+          const nodesOfKind = kindToIdMap.get(sourceId);
+          if (nodesOfKind && nodesOfKind.length > 0) {
+            console.warn(`⚠️ Edge ${idx + 1} still has kind-based source "${sourceId}", fixing now...`);
+            if (op.edge) {
+              op.edge.source = nodesOfKind[0].id;
+            } else {
+              op.from = nodesOfKind[0].id;
+            }
+            console.log(`  ✅ Fixed edge ${idx + 1} source to "${nodesOfKind[0].id}"`);
+          }
+        }
+        if (targetId && (targetId.includes('action.') || targetId.includes('trigger.'))) {
+          const nodesOfKind = kindToIdMap.get(targetId);
+          if (nodesOfKind && nodesOfKind.length > 0) {
+            console.warn(`⚠️ Edge ${idx + 1} still has kind-based target "${targetId}", fixing now...`);
+            if (op.edge) {
+              op.edge.target = nodesOfKind[0].id;
+            } else {
+              op.to = nodesOfKind[0].id;
+            }
+            console.log(`  ✅ Fixed edge ${idx + 1} target to "${nodesOfKind[0].id}"`);
+          }
+        }
+      } else if (op.op === 'BULK' && op.ops) {
+        console.log(`  BULK ${idx + 1} with ${op.ops.length} nested ops`);
+        op.ops.forEach((nestedOp, nestedIdx) => {
+          if (nestedOp.op === 'ADD_EDGE') {
+            const sourceId = nestedOp.from || (nestedOp.edge && nestedOp.edge.source);
+            const targetId = nestedOp.to || (nestedOp.edge && nestedOp.edge.target);
+            console.log(`    Nested Edge ${nestedIdx + 1}: source="${sourceId}", target="${targetId}"`);
+            // Fix nested edges too
+            if (sourceId && (sourceId.includes('action.') || sourceId.includes('trigger.'))) {
+              const nodesOfKind = kindToIdMap.get(sourceId);
+              if (nodesOfKind && nodesOfKind.length > 0) {
+                if (nestedOp.edge) {
+                  nestedOp.edge.source = nodesOfKind[0].id;
+                } else {
+                  nestedOp.from = nodesOfKind[0].id;
+                }
+              }
+            }
+            if (targetId && (targetId.includes('action.') || targetId.includes('trigger.'))) {
+              const nodesOfKind = kindToIdMap.get(targetId);
+              if (nodesOfKind && nodesOfKind.length > 0) {
+                if (nestedOp.edge) {
+                  nestedOp.edge.target = nodesOfKind[0].id;
+                } else {
+                  nestedOp.to = nodesOfKind[0].id;
+                }
+              }
+            }
+          }
+        });
+      }
     });
     
     if (processedOps.length === 1) {
+      console.log('✅ Returning single operation:', processedOps[0].op);
       return processedOps[0];
     }
     
+    console.log(`✅ Returning BULK operation with ${processedOps.length} operations`);
     return { op: "BULK", ops: processedOps };
   } catch (error) {
     console.error("Error planning from intent:", error);
@@ -234,8 +559,15 @@ function normalizePatch(patch) {
       // Try to create a default node if we have some info
       if (patch.id || patch.kind || patch.label) {
         console.warn('⚠️ Attempting to reconstruct node from patch properties');
-        patch.node = createNode(patch.kind || 'action.http.request', {
-          id: patch.id,
+        const nodeKind = patch.kind || 'action.http.request';
+        // Generate unique ID if not provided or if it looks like a kind
+        let nodeId = patch.id;
+        if (!nodeId || nodeId === nodeKind || nodeId.includes('action.') || nodeId.includes('trigger.')) {
+          nodeId = undefined; // Let createNode generate a unique ID
+          console.warn('⚠️ Patch id looks like a kind, will generate unique ID. Kind:', nodeKind);
+        }
+        patch.node = createNode(nodeKind, {
+          id: nodeId,
           data: {
             label: patch.label || patch.id || 'Untitled Node',
             ...(patch.data || {})
@@ -250,11 +582,6 @@ function normalizePatch(patch) {
     }
     
     // Ensure node has all required properties
-    if (!patch.node.id) {
-      console.warn('⚠️ Node missing id, generating one');
-      patch.node.id = `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    }
-    
     if (!patch.node.data) {
       patch.node.data = {};
     }
@@ -263,6 +590,16 @@ function normalizePatch(patch) {
       console.warn('⚠️ Node missing kind:', patch.node);
       // Try to infer from label or set default
       patch.node.data.kind = 'action.http.request';
+    }
+    
+    // Check and fix ID after we know the kind
+    if (!patch.node.id) {
+      console.warn('⚠️ Node missing id, generating one');
+      patch.node.id = `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    } else if (patch.node.id === patch.node.data.kind || patch.node.id.includes('action.') || patch.node.id.includes('trigger.')) {
+      // If AI mistakenly used the kind as the ID, generate a new unique ID
+      console.warn('⚠️ Node id matches kind or looks like a kind, generating new unique id. Old id:', patch.node.id, 'Kind:', patch.node.data.kind);
+      patch.node.id = `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     }
     
     if (patch.node.data.kind && !patch.node.data.role) {
@@ -277,9 +614,16 @@ function normalizePatch(patch) {
       patch.node.type = 'default';
     }
     
-    if (!patch.node.data.label || patch.node.data.label.trim() === '') {
-      patch.node.data.label = getDefaultLabel(patch.node.data.kind) || patch.node.data.kind || 'Untitled Node';
-      console.log('📝 Setting default label in normalizePatch:', patch.node.data.kind, '→', patch.node.data.label);
+    if (!patch.node.data.label || patch.node.data.label.trim() === '' || patch.node.data.label === 'Untitled Node') {
+      // Use generateNodeLabel for better labels based on config
+      // For HTTP requests, try to infer platform from intent if not in config
+      let config = patch.node.data.config || {};
+      if (patch.node.data.kind === 'action.http.request' && !config.platform && !config.service) {
+        // Try to infer from the original intent (we'll pass this through context if needed)
+        // For now, just use the labeler which will check the URL
+      }
+      patch.node.data.label = generateNodeLabel(patch.node.data.kind, config) || getDefaultLabel(patch.node.data.kind) || patch.node.data.kind || 'Untitled Node';
+      console.log('📝 Setting label in normalizePatch:', patch.node.data.kind, '→', patch.node.data.label);
     }
     
     if (!patch.node.data.config) {
@@ -336,16 +680,32 @@ function planFromIntentFallback(intent, contextSummary, nodes = []) {
     if (lower.includes('facebook') && (lower.includes('comment') || lower.includes('reply'))) {
       triggerNode = createNode('trigger.facebook.comment', {
         position: { x: cursorX, y },
-        data: { label: 'Facebook Comment' }
+        data: { 
+          label: generateNodeLabel('trigger.facebook.comment', {}),
+          config: {}
+        }
       });
       patches.push({ op: 'ADD_NODE', node: triggerNode });
       cursorX += 250;
-    } else if (lower.includes('schedule') || lower.includes('daily') || lower.includes('weekly')) {
+    } else if (lower.includes('schedule') || lower.includes('daily') || lower.includes('weekly') || lower.includes('every') || lower.includes('hour')) {
+      const schedule = lower.includes('daily') || lower.includes('day') ? '0 0 * * *' : 
+                      lower.includes('hourly') || lower.includes('hour') ? '0 * * * *' :
+                      lower.includes('weekly') || lower.includes('monday') ? '0 0 * * 0' : '0 0 * * *';
       triggerNode = createNode('trigger.scheduler.cron', {
         position: { x: cursorX, y },
         data: { 
-          label: lower.includes('daily') ? 'Daily Schedule' : 'Scheduled Trigger',
-          config: { schedule: lower.includes('daily') ? '0 0 * * *' : '0 * * * *' }
+          label: generateNodeLabel('trigger.scheduler.cron', { schedule }),
+          config: { schedule }
+        }
+      });
+      patches.push({ op: 'ADD_NODE', node: triggerNode });
+      cursorX += 250;
+    } else if (lower.includes('webhook') || lower.includes('form') || lower.includes('submit')) {
+      triggerNode = createNode('trigger.webhook.inbound', {
+        position: { x: cursorX, y },
+        data: { 
+          label: generateNodeLabel('trigger.webhook.inbound', {}),
+          config: {}
         }
       });
       patches.push({ op: 'ADD_NODE', node: triggerNode });
@@ -358,7 +718,10 @@ function planFromIntentFallback(intent, contextSummary, nodes = []) {
     if (lower.includes('facebook') && (lower.includes('reply') || lower.includes('comment'))) {
       const node = createNode('action.facebook.reply', {
         position: { x: cursorX, y },
-        data: { label: 'Reply to Facebook Comment' }
+        data: { 
+          label: generateNodeLabel('action.facebook.reply', {}),
+          config: {}
+        }
       });
       actionNodes.push(node);
       cursorX += 250;
@@ -367,25 +730,58 @@ function planFromIntentFallback(intent, contextSummary, nodes = []) {
     if (lower.includes('facebook') && (lower.includes('dm') || lower.includes('direct message'))) {
       const node = createNode('action.facebook.dm', {
         position: { x: cursorX, y },
-        data: { label: 'Send Facebook DM' }
+        data: { 
+          label: generateNodeLabel('action.facebook.dm', {}),
+          config: {}
+        }
       });
       actionNodes.push(node);
       cursorX += 250;
     }
     
-    if (lower.includes('sheet') || lower.includes('google')) {
+    if (lower.includes('sheet') || lower.includes('google') || lower.includes('save') || lower.includes('log')) {
       const node = createNode('action.sheets.appendRow', {
         position: { x: cursorX, y },
-        data: { label: 'Add to Google Sheets' }
+        data: { 
+          label: generateNodeLabel('action.sheets.appendRow', {}),
+          config: {}
+        }
       });
       actionNodes.push(node);
       cursorX += 250;
     }
     
-    if (lower.includes('email')) {
+    if (lower.includes('email') || lower.includes('send') || lower.includes('remind') || lower.includes('alert') || lower.includes('notify')) {
       const node = createNode('action.email.send', {
         position: { x: cursorX, y },
-        data: { label: 'Send Email' }
+        data: { 
+          label: generateNodeLabel('action.email.send', {}),
+          config: {}
+        }
+      });
+      actionNodes.push(node);
+      cursorX += 250;
+    }
+    
+    if (lower.includes('telegram') || lower.includes('sms')) {
+      const node = createNode('action.telegram.sendMessage', {
+        position: { x: cursorX, y },
+        data: { 
+          label: generateNodeLabel('action.telegram.sendMessage', {}),
+          config: {}
+        }
+      });
+      actionNodes.push(node);
+      cursorX += 250;
+    }
+    
+    if (lower.includes('http') || lower.includes('api') || lower.includes('fetch') || lower.includes('collect') || lower.includes('get data')) {
+      const node = createNode('action.http.request', {
+        position: { x: cursorX, y },
+        data: { 
+          label: generateNodeLabel('action.http.request', { method: 'GET' }),
+          config: { method: 'GET' }
+        }
       });
       actionNodes.push(node);
       cursorX += 250;
@@ -451,6 +847,10 @@ function planFromIntentFallback(intent, contextSummary, nodes = []) {
   }
 
   if (lower.includes('remove') || lower.includes('delete')) {
+    console.log('🔍 Fallback planner: Detected remove/delete request');
+    console.log('🔍 Intent:', intent);
+    console.log('🔍 Available nodes:', existingNodes);
+    
     // Extract node name from intent - more flexible matching
     const nodeMatch = intent.match(/(?:remove|delete)\s+(?:the\s+)?([a-z\s]+?)(?:\s+node|\s+step|$)/i);
     let nodeName = nodeMatch ? nodeMatch[1].trim() : '';
@@ -464,46 +864,67 @@ function planFromIntentFallback(intent, contextSummary, nodes = []) {
       }
     }
     
+    console.log(`🔍 Extracted node name: "${nodeName}"`);
+    
     if (nodeName) {
-      console.log(`🔍 Looking for node matching: "${nodeName}"`);
-      console.log(`📋 Available nodes:`, existingNodes.map(n => ({ id: n.id, label: n.label })));
-      
       // Try to match against existing nodes with multiple strategies
       const matchingNode = existingNodes.find(n => {
         const label = (n.label || '').toLowerCase();
         const name = nodeName.toLowerCase();
         const nodeId = (n.id || '').toLowerCase();
+        const kind = (n.kind || '').toLowerCase();
         
         // Strategy 1: Exact label match
-        if (label === name) return true;
+        if (label === name) {
+          console.log(`  ✓ Exact label match: "${label}"`);
+          return true;
+        }
         
         // Strategy 2: Label contains name or vice versa
-        if (label.includes(name) || name.includes(label)) return true;
+        if (label.includes(name) || name.includes(label)) {
+          console.log(`  ✓ Partial label match: "${label}" contains "${name}"`);
+          return true;
+        }
         
         // Strategy 3: First word match
         const firstWord = name.split(' ')[0];
-        if (firstWord && label.includes(firstWord)) return true;
+        if (firstWord && label.includes(firstWord)) {
+          console.log(`  ✓ First word match: "${firstWord}" in "${label}"`);
+          return true;
+        }
         
         // Strategy 4: ID contains name (for step_0, step_1, etc.)
-        if (nodeId.includes(name) || name.includes(nodeId)) return true;
+        if (nodeId.includes(name) || name.includes(nodeId)) {
+          console.log(`  ✓ ID match: "${nodeId}" contains "${name}"`);
+          return true;
+        }
         
         // Strategy 5: Match by kind keywords (facebook, sheets, email, etc.)
-        const keywords = ['facebook', 'sheets', 'email', 'telegram', 'reply', 'dm', 'http'];
-        const matchingKeyword = keywords.find(k => name.includes(k) && label.includes(k));
-        if (matchingKeyword) return true;
+        const keywords = ['facebook', 'sheets', 'email', 'telegram', 'reply', 'dm', 'http', 'webhook', 'scheduler'];
+        const matchingKeyword = keywords.find(k => name.includes(k) && (label.includes(k) || kind.includes(k)));
+        if (matchingKeyword) {
+          console.log(`  ✓ Keyword match: "${matchingKeyword}" found`);
+          return true;
+        }
         
         return false;
       });
       
       if (matchingNode) {
-        console.log(`✅ Matched "${nodeName}" to node:`, matchingNode.id, matchingNode.label);
+        console.log(`✅ Fallback: Matched "${nodeName}" to node:`, matchingNode.id, matchingNode.label);
         patches.push({ op: 'REMOVE_NODE', id: matchingNode.id });
       } else {
-        console.warn(`⚠️ Could not match "${nodeName}" to any node.`);
-        console.warn(`Available nodes:`, existingNodes.map(n => ({ id: n.id, label: n.label })));
+        console.error(`❌ Fallback: Could not match "${nodeName}" to any node.`);
+        console.error(`Available nodes:`, existingNodes.map(n => ({ id: n.id, label: n.label, kind: n.kind })));
       }
     } else {
-      console.warn('⚠️ Could not extract node name from intent:', intent);
+      console.warn('⚠️ Fallback: Could not extract node name from intent:', intent);
+      // If we can't extract a name, try to remove the last node (common pattern)
+      if (existingNodes.length > 1) {
+        const lastNode = existingNodes[existingNodes.length - 1];
+        console.log(`⚠️ Fallback: Attempting to remove last node as fallback:`, lastNode.id, lastNode.label);
+        patches.push({ op: 'REMOVE_NODE', id: lastNode.id });
+      }
     }
   }
 

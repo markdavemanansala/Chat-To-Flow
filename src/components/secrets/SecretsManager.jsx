@@ -10,7 +10,7 @@ import { useToast } from "@/components/ToastProvider"
 
 const SECRETS_STORAGE_KEY = 'workflow_secrets'
 
-export function SecretsManager({ open, onOpenChange }) {
+export function SecretsManager({ open, onOpenChange, prefillNodeKind = null }) {
   const { showToast } = useToast()
   const [secrets, setSecrets] = useState([])
   const [isAdding, setIsAdding] = useState(false)
@@ -18,8 +18,29 @@ export function SecretsManager({ open, onOpenChange }) {
     label: '',
     value: '',
     scope: 'workspace',
-    nodeKinds: []
+    nodeKinds: prefillNodeKind ? [prefillNodeKind] : []
   })
+  
+  // Auto-open add form if prefillNodeKind is provided
+  useEffect(() => {
+    if (prefillNodeKind && open) {
+      setIsAdding(true)
+      // Auto-generate label based on node kind
+      const getLabelFromKind = (kind) => {
+        if (kind.includes('facebook')) return 'Facebook API Key'
+        if (kind.includes('telegram')) return 'Telegram Bot Token'
+        if (kind.includes('email')) return 'Email API Key'
+        if (kind.includes('sheets')) return 'Google Sheets API Key'
+        return 'API Key'
+      }
+      setFormData({
+        label: getLabelFromKind(prefillNodeKind),
+        value: '',
+        scope: 'workspace',
+        nodeKinds: [prefillNodeKind]
+      })
+    }
+  }, [prefillNodeKind, open])
 
   useEffect(() => {
     const saved = localStorage.getItem(SECRETS_STORAGE_KEY)
@@ -45,19 +66,34 @@ export function SecretsManager({ open, onOpenChange }) {
       return
     }
 
+    // Check if updating existing secret (same nodeKinds)
+    const existingIndex = secrets.findIndex(s => 
+      s.nodeKinds && 
+      formData.nodeKinds.length > 0 &&
+      JSON.stringify(s.nodeKinds.sort()) === JSON.stringify(formData.nodeKinds.sort())
+    )
+
     const newSecret = {
-      id: Date.now().toString(),
+      id: existingIndex >= 0 ? secrets[existingIndex].id : Date.now().toString(),
       label: formData.label,
       value: formData.value, // In real app, encrypt this
       scope: formData.scope,
       nodeKinds: formData.nodeKinds,
-      createdAt: new Date().toISOString()
+      createdAt: existingIndex >= 0 ? secrets[existingIndex].createdAt : new Date().toISOString()
     }
 
-    saveSecrets([...secrets, newSecret])
-    setFormData({ label: '', value: '', scope: 'workspace', nodeKinds: [] })
+    if (existingIndex >= 0) {
+      const updated = [...secrets]
+      updated[existingIndex] = newSecret
+      saveSecrets(updated)
+      showToast('Secret updated successfully', 'success')
+    } else {
+      saveSecrets([...secrets, newSecret])
+      showToast('Secret saved successfully', 'success')
+    }
+    
+    setFormData({ label: '', value: '', scope: 'workspace', nodeKinds: prefillNodeKind ? [prefillNodeKind] : [] })
     setIsAdding(false)
-    showToast('Secret saved successfully', 'success')
   }
 
   const handleDelete = (id) => {
@@ -98,8 +134,21 @@ export function SecretsManager({ open, onOpenChange }) {
                     value={formData.value}
                     onChange={(e) => setFormData({ ...formData, value: e.target.value })}
                     rows={3}
+                    className="font-mono text-sm"
                   />
                 </div>
+                {formData.nodeKinds.length > 0 && (
+                  <div className="space-y-2">
+                    <Label>For Node Type</Label>
+                    <div className="flex flex-wrap gap-1">
+                      {formData.nodeKinds.map((kind, idx) => (
+                        <Badge key={idx} variant="outline" className="text-xs">
+                          {kind}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <Label>Scope</Label>
                   <select

@@ -252,7 +252,7 @@ export function Chat() {
                 if (!patchApplied) {
                   // Get fresh summary from store
                   const currentSummary = useAppStore.getState().aiContext.currentSummary || 'Empty workflow (no nodes)';
-                  const patch = await planFromIntent(userMessage, currentSummary, nodesToUse)
+                  const patch = await planFromIntent(userMessage, currentSummary, nodesToUse, userMessage)
                   
                   // Apply patch using store's applyPatch
                   // Empty BULK patches are OK (e.g., for confirmations like "Yes, daily")
@@ -610,7 +610,7 @@ export function Chat() {
       
       // Use patch-based system for new workflows
       const currentSummary = existingNodes.length > 0 ? aiContext.currentSummary : 'Empty workflow (no nodes)'
-      const patch = await planFromIntent(combinedIntent, currentSummary, existingNodes)
+      const patch = await planFromIntent(combinedIntent, currentSummary, existingNodes, combinedIntent)
       
       // Apply patch
       const result = applyPatch(patch)
